@@ -38,25 +38,18 @@ Example connection string:
 Host=localhost;Port=5432;Database=AgroTradeDb;Username=postgres;Password=YOUR_PASSWORD
 ```
 
-## WooCommerce Import
-
-WooCommerce credentials are saved locally with .NET user-secrets, not inside the project files.
+## Products
 
 Swagger endpoints:
 
 ```text
-POST /api/products/sync
 GET /api/products
 GET /api/products?search=apple
-GET /api/products?source=local
 GET /api/products/{id}
 POST /api/products
 ```
 
-`POST /api/products/sync` reads products from WooCommerce and saves them to PostgreSQL.
-
-`GET /api/products` returns both WooCommerce and locally created products. Use `search`
-to search by name, SKU, or categories, and `source` with `local` or `woocommerce`.
+`GET /api/products` returns locally managed products. Use `search` to search by name, SKU, or categories.
 
 Local product create body:
 
@@ -75,4 +68,34 @@ Local product create body:
   "imageUrl": "https://example.com/apple.jpg",
   "categoryNames": "Fruits"
 }
+```
+
+## Liberty TXPG Payments
+
+Liberty TXPG credentials are saved with .NET user-secrets or server environment variables, not in `appsettings.json`.
+
+Local secret keys:
+
+```powershell
+dotnet user-secrets set "LibertyTxpg:TerminalId" "YOUR_TERMINAL_ID" --project src/AgroTrade.Api/AgroTrade.Api.csproj
+dotnet user-secrets set "LibertyTxpg:BasicAuthUsername" "YOUR_USERNAME" --project src/AgroTrade.Api/AgroTrade.Api.csproj
+dotnet user-secrets set "LibertyTxpg:BasicAuthPassword" "YOUR_PASSWORD" --project src/AgroTrade.Api/AgroTrade.Api.csproj
+```
+
+Payment flow:
+
+```text
+POST /api/orders
+POST /api/payments/liberty/orders/{orderId}/start
+GET /api/payments/liberty/approve
+GET /api/payments/liberty/decline
+GET /api/payments/liberty/cancel
+```
+
+Give Liberty these URLs after replacing the domain:
+
+```text
+Approve URL: https://YOUR-API-DOMAIN/api/payments/liberty/approve
+Decline URL: https://YOUR-API-DOMAIN/api/payments/liberty/decline
+Cancel URL:  https://YOUR-API-DOMAIN/api/payments/liberty/cancel
 ```

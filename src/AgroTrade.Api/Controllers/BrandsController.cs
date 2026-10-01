@@ -1,6 +1,6 @@
 using AgroTrade.Api;
 using AgroTrade.Application.Services;
-using AgroTrade.Contracts.Categories;
+using AgroTrade.Contracts.Brands;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,22 +9,22 @@ namespace AgroTrade.Api.Controllers;
 [ApiController]
 [Authorize(Policy = AuthorizationPolicies.AdminOrManager)]
 [Route("api/[controller]")]
-public class CategoriesController(ICategoryService categoryService) : ControllerBase
+public class BrandsController(IBrandService brandService) : ControllerBase
 {
     [HttpGet]
     [AllowAnonymous]
     public async Task<IActionResult> Get(CancellationToken cancellationToken)
     {
-        return Ok(await categoryService.GetTreeAsync(cancellationToken));
+        return Ok(await brandService.GetAsync(cancellationToken));
     }
 
     [HttpPost]
-    public async Task<IActionResult> Create(CategoryRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> Create(BrandRequest request, CancellationToken cancellationToken)
     {
         try
         {
-            var category = await categoryService.CreateAsync(request, cancellationToken);
-            return CreatedAtAction(nameof(Get), new { id = category.Id }, category);
+            var brand = await brandService.CreateAsync(request, cancellationToken);
+            return CreatedAtAction(nameof(Get), new { id = brand.Id }, brand);
         }
         catch (ArgumentException exception)
         {
@@ -33,12 +33,12 @@ public class CategoriesController(ICategoryService categoryService) : Controller
     }
 
     [HttpPut("{id:int}")]
-    public async Task<IActionResult> Update(int id, CategoryRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> Update(int id, BrandRequest request, CancellationToken cancellationToken)
     {
         try
         {
-            var category = await categoryService.UpdateAsync(id, request, cancellationToken);
-            return category is null ? NotFound() : Ok(category);
+            var brand = await brandService.UpdateAsync(id, request, cancellationToken);
+            return brand is null ? NotFound() : Ok(brand);
         }
         catch (ArgumentException exception)
         {
@@ -51,7 +51,7 @@ public class CategoriesController(ICategoryService categoryService) : Controller
     {
         try
         {
-            return await categoryService.DeleteAsync(id, cancellationToken) ? NoContent() : NotFound();
+            return await brandService.DeleteAsync(id, cancellationToken) ? NoContent() : NotFound();
         }
         catch (InvalidOperationException exception)
         {

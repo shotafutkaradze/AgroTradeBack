@@ -1,7 +1,9 @@
-using AgroTrade.Api.Data;
-using AgroTrade.Api.Services;
+using AgroTrade.Application;
+using AgroTrade.Api;
+using AgroTrade.Domain.Enums;
+using AgroTrade.Infrastructure;
+using AgroTrade.Infrastructure.Services;
 using Microsoft.AspNetCore.Authentication;
-using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -10,18 +12,17 @@ var webRootPath = builder.Environment.WebRootPath ?? Path.Combine(builder.Enviro
 builder.Environment.WebRootPath = webRootPath;
 Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "products"));
 
-builder.Services.AddDbContext<AgroTradeDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
-
-builder.Services.Configure<WooCommerceOptions>(builder.Configuration.GetSection("WooCommerce"));
-builder.Services.AddHttpClient<IWooCommerceService, WooCommerceService>();
-builder.Services.AddScoped<IProductImportService, ProductImportService>();
-builder.Services.AddSingleton<AppTokenService>();
+builder.Services.AddInfrastructure(builder.Configuration);
+builder.Services.AddApplication();
 
 builder.Services
     .AddAuthentication("Bearer")
     .AddScheme<AuthenticationSchemeOptions, AppTokenAuthenticationHandler>("Bearer", _ => { });
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AuthorizationPolicies.AdminOrManager, policy =>
+        policy.RequireRole(UserRole.Admin.ToValue(), UserRole.Manager.ToValue()));
+});
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -48,11 +49,7 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var dbContext = scope.ServiceProvider.GetRequiredService<AgroTradeDbContext>();
-    dbContext.Database.Migrate();
-}
+await app.Services.MigrateDatabaseAsync();
 
 if (app.Environment.IsDevelopment())
 {
