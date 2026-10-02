@@ -15,7 +15,7 @@ public interface IOrderService
     Task<OrderDto?> UpdateStatusAsync(int id, UpdateOrderStatusRequest request, CancellationToken cancellationToken);
 }
 
-public class OrderService(IAgroTradeDbContext dbContext) : IOrderService
+public class OrderService(IAgroTradeDbContext dbContext, IActivityLogService activityLogService) : IOrderService
 {
     public async Task<IReadOnlyList<OrderDto>> GetAsync(DateTimeOffset? from, DateTimeOffset? to, CancellationToken cancellationToken)
     {
@@ -150,6 +150,17 @@ public class OrderService(IAgroTradeDbContext dbContext) : IOrderService
 
         dbContext.Orders.Add(order);
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "info",
+            "order",
+            "order_created",
+            $"შეიქმნა შეკვეთა {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            order.PaymentMethod.ToValue(),
+            order.PaymentStatus.ToValue(),
+            Details: $"თანხა: {order.Total:0.##} ₾; მომხმარებელი: {order.CustomerFirstName} {order.CustomerLastName}"),
+            cancellationToken);
 
         return ToDto(order);
     }
@@ -175,10 +186,22 @@ public class OrderService(IAgroTradeDbContext dbContext) : IOrderService
             return null;
         }
 
+        var oldStatus = order.Status;
         order.Status = status;
         order.UpdatedAt = DateTimeOffset.UtcNow;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "info",
+            "order",
+            "order_status_changed",
+            $"შეკვეთის სტატუსი შეიცვალა: {oldStatus.ToValue()} -> {status.ToValue()}",
+            order.Id,
+            order.OrderNumber,
+            order.PaymentMethod.ToValue(),
+            order.PaymentStatus.ToValue()),
+            cancellationToken);
+
         return ToDto(order);
     }
 

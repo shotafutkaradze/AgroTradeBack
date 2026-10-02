@@ -40,5 +40,8 @@ public record ProductDto(
     string? CategoryNames,
     ProductCategoryDto? Category,
     string? SpecificationsJson,
+    bool IsHidden,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt);
+
+public record UpdateProductVisibilityRequest(bool IsHidden);

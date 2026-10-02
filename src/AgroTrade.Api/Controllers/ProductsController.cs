@@ -16,9 +16,9 @@ public class ProductsController(
     IWebHostEnvironment environment) : ControllerBase
 {
     [HttpGet]
-    public async Task<IActionResult> Get([FromQuery] string? search, CancellationToken cancellationToken)
+    public async Task<IActionResult> Get([FromQuery] string? search, [FromQuery] bool includeHidden, CancellationToken cancellationToken)
     {
-        return Ok(await productService.GetAsync(search, cancellationToken));
+        return Ok(await productService.GetAsync(search, includeHidden, cancellationToken));
     }
 
     [HttpGet("{id:int}")]
@@ -73,6 +73,17 @@ public class ProductsController(
         {
             return BadRequest(new { message = exception.Message });
         }
+    }
+
+    [HttpPatch("{id:int}/visibility")]
+    [Authorize(Policy = AuthorizationPolicies.AdminOrManager)]
+    public async Task<IActionResult> UpdateVisibility(
+        int id,
+        UpdateProductVisibilityRequest request,
+        CancellationToken cancellationToken)
+    {
+        var product = await productService.UpdateVisibilityAsync(id, request.IsHidden, cancellationToken);
+        return product is null ? NotFound() : Ok(product);
     }
 
     private static CreateProductRequest ToCreateProductRequest(CreateProductFormRequest request, string? imageUrl)

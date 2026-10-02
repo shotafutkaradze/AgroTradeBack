@@ -12,5 +12,6 @@ public interface IAgroTradeDbContext
     DbSet<OrderItem> OrderItems { get; }
     DbSet<Payment> Payments { get; }
     DbSet<AppUser> AppUsers { get; }
+    DbSet<ActivityLog> ActivityLogs { get; }
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

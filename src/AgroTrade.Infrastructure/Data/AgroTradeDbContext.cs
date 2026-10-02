@@ -14,6 +14,7 @@ public class AgroTradeDbContext(DbContextOptions<AgroTradeDbContext> options) : 
     public DbSet<OrderItem> OrderItems => Set<OrderItem>();
     public DbSet<Payment> Payments => Set<Payment>();
     public DbSet<AppUser> AppUsers => Set<AppUser>();
+    public DbSet<ActivityLog> ActivityLogs => Set<ActivityLog>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -31,6 +32,7 @@ public class AgroTradeDbContext(DbContextOptions<AgroTradeDbContext> options) : 
                     value => value.ToStockStatusOrNull())
                 .HasMaxLength(100);
             entity.Property(product => product.ImageUrl).HasMaxLength(1000);
+            entity.Property(product => product.IsHidden).HasDefaultValue(false);
 
             entity.HasOne(product => product.Brand)
                 .WithMany(brand => brand.Products)
@@ -159,6 +161,21 @@ public class AgroTradeDbContext(DbContextOptions<AgroTradeDbContext> options) : 
             entity.Property(user => user.Role)
                 .HasConversion(value => value.ToValue(), value => value.ToUserRole())
                 .HasMaxLength(40);
+        });
+
+        modelBuilder.Entity<ActivityLog>(entity =>
+        {
+            entity.HasIndex(log => log.CreatedAt);
+            entity.HasIndex(log => log.OrderNumber);
+            entity.Property(log => log.Severity).HasMaxLength(40);
+            entity.Property(log => log.Category).HasMaxLength(80);
+            entity.Property(log => log.Event).HasMaxLength(120);
+            entity.Property(log => log.Message).HasMaxLength(500);
+            entity.Property(log => log.OrderNumber).HasMaxLength(80);
+            entity.Property(log => log.Provider).HasMaxLength(80);
+            entity.Property(log => log.Status).HasMaxLength(80);
+            entity.Property(log => log.Actor).HasMaxLength(160);
+            entity.Property(log => log.Details).HasMaxLength(4000);
         });
     }
 }

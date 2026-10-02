@@ -8,19 +8,25 @@ namespace AgroTrade.Application.Services;
 
 public interface IProductService
 {
-    Task<IReadOnlyList<ProductDto>> GetAsync(string? search, CancellationToken cancellationToken);
+    Task<IReadOnlyList<ProductDto>> GetAsync(string? search, bool includeHidden, CancellationToken cancellationToken);
     Task<ProductDto?> GetByIdAsync(int id, CancellationToken cancellationToken);
     Task<ProductDto> CreateAsync(CreateProductRequest request, CancellationToken cancellationToken);
     Task<ProductDto?> UpdateAsync(int id, CreateProductRequest request, CancellationToken cancellationToken);
+    Task<ProductDto?> UpdateVisibilityAsync(int id, bool isHidden, CancellationToken cancellationToken);
 }
 
 public class ProductService(IAgroTradeDbContext dbContext) : IProductService
 {
-    public async Task<IReadOnlyList<ProductDto>> GetAsync(string? search, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<ProductDto>> GetAsync(string? search, bool includeHidden, CancellationToken cancellationToken)
     {
         IQueryable<Product> query = dbContext.Products.AsNoTracking()
             .Include(product => product.Brand)
             .Include(product => product.Category);
+
+        if (!includeHidden)
+        {
+            query = query.Where(product => !product.IsHidden);
+        }
 
         if (!string.IsNullOrWhiteSpace(search))
         {
@@ -114,6 +120,20 @@ public class ProductService(IAgroTradeDbContext dbContext) : IProductService
         return await GetByIdAsync(product.Id, cancellationToken) ?? ToDto(product);
     }
 
+    public async Task<ProductDto?> UpdateVisibilityAsync(int id, bool isHidden, CancellationToken cancellationToken)
+    {
+        var product = await dbContext.Products.FirstOrDefaultAsync(product => product.Id == id, cancellationToken);
+        if (product is null)
+        {
+            return null;
+        }
+
+        product.IsHidden = isHidden;
+        product.UpdatedAt = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return await GetByIdAsync(product.Id, cancellationToken) ?? ToDto(product);
+    }
+
     private static void Validate(CreateProductRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
@@ -160,6 +180,7 @@ public class ProductService(IAgroTradeDbContext dbContext) : IProductService
             product.CategoryNames,
             product.Category is null ? null : new ProductCategoryDto(product.Category.Id, product.Category.Name, product.Category.ParentId),
             product.SpecificationsJson,
+            product.IsHidden,
             product.CreatedAt,
             product.UpdatedAt);
     }

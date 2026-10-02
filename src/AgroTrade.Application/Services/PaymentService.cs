@@ -42,6 +42,7 @@ public class PaymentService(
     IAgroTradeDbContext dbContext,
     ILibertyPayRefundClient libertyPayRefundClient,
     IBogInstallmentClient bogInstallmentClient,
+    IActivityLogService activityLogService,
     IOptions<LibertyPayOptions> libertyPayOptions,
     IOptions<BogInstallmentOptions> bogInstallmentOptions) : IPaymentService
 {
@@ -100,6 +101,17 @@ public class PaymentService(
         payment.UpdatedAt = now;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "info",
+            "payment",
+            "liberty_payment_started",
+            $"Liberty გადახდა დაიწყო შეკვეთაზე {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "Liberty",
+            payment.Status.ToValue(),
+            Details: $"თანხა: {order.Total:0.##} ₾"),
+            cancellationToken);
 
         var paymentUrl = BuildLibertyPayUrl(order);
         return new LibertyPayPaymentStartResponse(
@@ -179,6 +191,17 @@ public class PaymentService(
         payment.UpdatedAt = now;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "info",
+            "payment",
+            "bog_installment_started",
+            $"BOG განვადება დაიწყო შეკვეთაზე {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "BOG",
+            payment.Status.ToValue(),
+            Details: $"BOG order: {bogOrder.OrderId}; თანხა: {order.Total:0.##} ₾"),
+            cancellationToken);
 
         return new BogInstallmentPaymentStartResponse(
             order.Id,
@@ -204,11 +227,27 @@ public class PaymentService(
     {
         if (!IsCallbackCheckValid(request))
         {
+            await AddPaymentIssueLogAsync(
+                "liberty_callback_invalid_check",
+                "Liberty callback ვერ გადამოწმდა",
+                request.OrderCode,
+                "Liberty",
+                request.Status,
+                $"transactioncode={request.TransactionCode}; amount={request.Amount}; paymethod={request.PayMethod}",
+                cancellationToken);
             return BuildCallbackResponse("-3", "Invalid check", request.TransactionCode);
         }
 
         if (string.IsNullOrWhiteSpace(request.OrderCode))
         {
+            await AddPaymentIssueLogAsync(
+                "liberty_callback_missing_order",
+                "Liberty callback მოვიდა შეკვეთის ნომრის გარეშე",
+                null,
+                "Liberty",
+                request.Status,
+                $"transactioncode={request.TransactionCode}; amount={request.Amount}",
+                cancellationToken);
             return BuildCallbackResponse("-3", "Missing ordercode", request.TransactionCode);
         }
 
@@ -218,12 +257,31 @@ public class PaymentService(
 
         if (order is null)
         {
+            await AddPaymentIssueLogAsync(
+                "liberty_callback_order_not_found",
+                $"Liberty callback-ზე შეკვეთა ვერ მოიძებნა: {request.OrderCode}",
+                request.OrderCode,
+                "Liberty",
+                request.Status,
+                $"transactioncode={request.TransactionCode}; amount={request.Amount}",
+                cancellationToken);
             return BuildCallbackResponse("-2", "Order not found", request.TransactionCode);
         }
 
         var expectedAmount = ToTetri(order.Total);
         if (!string.Equals(request.Amount, expectedAmount, StringComparison.Ordinal))
         {
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "error",
+                "payment",
+                "liberty_callback_invalid_amount",
+                $"Liberty callback-ზე თანხა არ ემთხვევა შეკვეთას {order.OrderNumber}",
+                order.Id,
+                order.OrderNumber,
+                "Liberty",
+                request.Status,
+                Details: $"მოვიდა: {request.Amount}; მოსალოდნელი: {expectedAmount}; transactioncode={request.TransactionCode}"),
+                cancellationToken);
             return BuildCallbackResponse("-3", "Invalid amount", request.TransactionCode);
         }
 
@@ -287,6 +345,22 @@ public class PaymentService(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            isCompleted ? "success" : isCheck ? "info" : "error",
+            "payment",
+            isCompleted ? "liberty_payment_paid" : isCheck ? "liberty_payment_check" : "liberty_payment_failed",
+            isCompleted
+                ? $"Liberty გადახდა წარმატებულია: {order.OrderNumber}"
+                : isCheck
+                    ? $"Liberty გადახდა დადასტურებას ელოდება: {order.OrderNumber}"
+                    : $"Liberty გადახდა ჩავარდა: {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "Liberty",
+            payment.Status.ToValue(),
+            Details: $"bankStatus={request.Status}; transactioncode={request.TransactionCode}; amount={request.Amount}; paymethod={request.PayMethod}"),
+            cancellationToken);
+
         return BuildCallbackResponse("0", "Ok", request.TransactionCode);
     }
 
@@ -335,18 +409,65 @@ public class PaymentService(
         var refundDescription = TrimToLength(
             string.IsNullOrWhiteSpace(request.Reason) ? $"Refund for {order.OrderNumber}" : request.Reason.Trim(),
             100);
-        var refundResult = await libertyPayRefundClient.RefundAsync(
-            order.OrderNumber,
-            refundCode,
-            refundDescription,
-            int.Parse(ToTetri(refundAmount)),
-            cancellationToken);
+        LibertyPayRefundResult refundResult;
+        try
+        {
+            refundResult = await libertyPayRefundClient.RefundAsync(
+                order.OrderNumber,
+                refundCode,
+                refundDescription,
+                int.Parse(ToTetri(refundAmount)),
+                cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            var exceptionDetails = exception is LibertyPayRefundException refundException
+                ? BuildRefundLogDetails(
+                    refundAmount,
+                    refundCode,
+                    order.OrderNumber,
+                    refundException.RequestUrl,
+                    refundException.RequestBody,
+                    refundException.ResponseBody,
+                    exception.Message)
+                : $"error={exception.Message}";
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "error",
+                "payment",
+                "liberty_refund_error",
+                $"Liberty refund ვერ შესრულდა: {order.OrderNumber}",
+                order.Id,
+                order.OrderNumber,
+                "Liberty",
+                payment.Status.ToValue(),
+                Details: TrimToLength(exceptionDetails, 4000)),
+                cancellationToken);
+            throw;
+        }
 
         if (!refundResult.IsSuccess)
         {
             var detail = string.IsNullOrWhiteSpace(refundResult.RawResponse)
                 ? string.Empty
                 : $" Response: {TrimToLength(refundResult.RawResponse.ReplaceLineEndings(" "), 500)}";
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "error",
+                "payment",
+                "liberty_refund_failed",
+                $"Liberty refund უარყოფილია: {order.OrderNumber}",
+                order.Id,
+                order.OrderNumber,
+                "Liberty",
+                refundResult.StatusCode,
+                Details: TrimToLength(BuildRefundLogDetails(
+                    refundAmount,
+                    refundCode,
+                    order.OrderNumber,
+                    refundResult.RequestUrl,
+                    refundResult.RequestBody,
+                    refundResult.RawResponse,
+                    $"status={refundResult.StatusCode}") + detail, 4000)),
+                cancellationToken);
             throw new InvalidOperationException($"Liberty refund failed with status {refundResult.StatusCode}.{detail}");
         }
 
@@ -373,6 +494,24 @@ public class PaymentService(
         order.UpdatedAt = now;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "success",
+            "payment",
+            "liberty_refund_success",
+            $"Liberty refund წარმატებულია: {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "Liberty",
+            payment.ProviderRefundStatus,
+            Details: TrimToLength(BuildRefundLogDetails(
+                refundAmount,
+                refundCode,
+                order.OrderNumber,
+                refundResult.RequestUrl,
+                refundResult.RequestBody,
+                refundResult.RawResponse,
+                $"დაბრუნდა: {refundAmount:0.##} ₾; სულ დაბრუნებული: {payment.RefundedAmount:0.##} ₾"), 4000)),
+            cancellationToken);
 
         return new RefundPaymentResponse(
             order.Id,
@@ -398,6 +537,15 @@ public class PaymentService(
     {
         if (string.IsNullOrWhiteSpace(paymentOrderCode))
         {
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "error",
+                "payment",
+                "liberty_return_missing_order",
+                "Liberty დაბრუნდა შეკვეთის კოდის გარეშე",
+                Provider: "Liberty",
+                Status: paymentStatus.ToValue(),
+                Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
+                cancellationToken);
             return null;
         }
 
@@ -406,6 +554,16 @@ public class PaymentService(
 
         if (order is null)
         {
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "error",
+                "payment",
+                "liberty_return_order_not_found",
+                $"Liberty დაბრუნდა, მაგრამ შეკვეთა ვერ მოიძებნა: {paymentOrderCode}",
+                OrderNumber: paymentOrderCode,
+                Provider: "Liberty",
+                Status: paymentStatus.ToValue(),
+                Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
+                cancellationToken);
             return null;
         }
 
@@ -438,6 +596,25 @@ public class PaymentService(
         }
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            paymentStatus == PaymentStatus.Paid ? "success" : "warning",
+            "payment",
+            paymentStatus == PaymentStatus.Paid
+                ? "liberty_return_paid"
+                : paymentStatus == PaymentStatus.Cancelled
+                    ? "liberty_return_cancelled"
+                    : "liberty_return_failed",
+            paymentStatus == PaymentStatus.Paid
+                ? $"Liberty დაბრუნება წარმატებულია: {order.OrderNumber}"
+                : paymentStatus == PaymentStatus.Cancelled
+                    ? $"Liberty გადახდა გაუქმდა მომხმარებლისგან: {order.OrderNumber}"
+                    : $"Liberty გადახდა დაბრუნდა შეცდომით: {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "Liberty",
+            paymentStatus.ToValue(),
+            Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
+            cancellationToken);
 
         return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
     }
@@ -509,8 +686,42 @@ public class PaymentService(
         payment.UpdatedAt = now;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            paymentStatus == PaymentStatus.Paid ? "success" : "warning",
+            "payment",
+            paymentStatus == PaymentStatus.Paid ? "bog_installment_paid" : "bog_installment_failed",
+            paymentStatus == PaymentStatus.Paid
+                ? $"BOG განვადება წარმატებულია: {order.OrderNumber}"
+                : $"BOG განვადება ვერ დასრულდა: {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "BOG",
+            paymentStatus.ToValue(),
+            Details: $"bankStatus={request.Status}; bogOrder={request.OrderId}"),
+            cancellationToken);
 
         return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
+    }
+
+    private async Task AddPaymentIssueLogAsync(
+        string eventName,
+        string message,
+        string? orderNumber,
+        string provider,
+        string? status,
+        string? details,
+        CancellationToken cancellationToken)
+    {
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "error",
+            "payment",
+            eventName,
+            message,
+            OrderNumber: orderNumber,
+            Provider: provider,
+            Status: status,
+            Details: details),
+            cancellationToken);
     }
 
     private string BuildLibertyPayUrl(Order order)
@@ -630,6 +841,41 @@ public class PaymentService(
     private static string TrimToLength(string value, int maxLength)
     {
         return value.Length <= maxLength ? value : value[..maxLength];
+    }
+
+    private static string BuildRefundLogDetails(
+        decimal refundAmount,
+        string refundCode,
+        string orderNumber,
+        string requestUrl,
+        string requestBody,
+        string? responseBody,
+        string? note = null)
+    {
+        var normalizedRequest = requestBody.ReplaceLineEndings(" ").Trim();
+        var normalizedResponse = string.IsNullOrWhiteSpace(responseBody)
+            ? null
+            : responseBody.ReplaceLineEndings(" ").Trim();
+
+        var builder = new StringBuilder()
+            .Append("orderNumber=").Append(orderNumber)
+            .Append("; refundCode=").Append(refundCode)
+            .Append("; amountGel=").Append(refundAmount.ToString("0.##"))
+            .Append("; amountTetri=").Append(ToTetri(refundAmount))
+            .Append("; requestUrl=").Append(requestUrl)
+            .Append("; requestBody=").Append(normalizedRequest);
+
+        if (!string.IsNullOrWhiteSpace(normalizedResponse))
+        {
+            builder.Append("; responseBody=").Append(normalizedResponse);
+        }
+
+        if (!string.IsNullOrWhiteSpace(note))
+        {
+            builder.Append("; note=").Append(note.ReplaceLineEndings(" ").Trim());
+        }
+
+        return builder.ToString();
     }
 
     private static string Sha256(string value)

@@ -3,6 +3,7 @@ using System;
 using AgroTrade.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace AgroTrade.Infrastructure.Migrations
 {
     [DbContext(typeof(AgroTradeDbContext))]
-    partial class AgroTradeDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261002081320_ProductVisibilityAndActivityLogDetails")]
+    partial class ProductVisibilityAndActivityLogDetails
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

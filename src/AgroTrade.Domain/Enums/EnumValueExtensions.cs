@@ -63,6 +63,19 @@ public static class EnumValueExtensions
         _ => UserRole.User
     };
 
+    public static bool TryToUserRole(this string? value, out UserRole role)
+    {
+        role = Normalize(value) switch
+        {
+            "admin" => UserRole.Admin,
+            "manager" => UserRole.Manager,
+            "user" => UserRole.User,
+            _ => default
+        };
+
+        return Normalize(value) is "admin" or "manager" or "user";
+    }
+
     public static OrderStatus ToOrderStatus(this string? value) => Normalize(value) switch
     {
         "processing" => OrderStatus.Processing,

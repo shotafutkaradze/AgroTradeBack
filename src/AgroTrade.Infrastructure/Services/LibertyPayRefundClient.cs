@@ -22,18 +22,39 @@ public class LibertyPayRefundClient(HttpClient httpClient, IOptions<LibertyPayOp
 
         var signature = Sha256(options.Merchant + orderCode + refundCode + description + amount + options.Key);
         var envelope = BuildRefundEnvelope(orderCode, refundCode, description, amount, signature);
-        using var request = new HttpRequestMessage(HttpMethod.Post, options.ServiceUrl);
+        var requestUrl = options.ServiceUrl.Trim();
+        using var request = new HttpRequestMessage(HttpMethod.Post, requestUrl);
         request.Content = new StringContent(envelope, Encoding.UTF8, "text/xml");
         request.Headers.TryAddWithoutValidation("SOAPAction", options.RefundSoapAction);
 
-        using var response = await httpClient.SendAsync(request, cancellationToken);
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            throw new LibertyPayRefundException(
+                $"Liberty PAY refund request failed before response: {exception.Message}",
+                requestUrl,
+                envelope,
+                innerException: exception);
+        }
+
+        using (response)
+        {
         var responseText = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            throw new InvalidOperationException($"Liberty PAY refund failed with HTTP {(int)response.StatusCode}: {responseText}");
+            throw new LibertyPayRefundException(
+                $"Liberty PAY refund failed with HTTP {(int)response.StatusCode}: {responseText}",
+                requestUrl,
+                envelope,
+                responseText);
         }
 
-        return ParseRefundResponse(responseText);
+        return ParseRefundResponse(responseText, requestUrl, envelope);
+        }
     }
 
     private string BuildRefundEnvelope(string orderCode, string refundCode, string description, int amount, string signature)
@@ -56,7 +77,7 @@ public class LibertyPayRefundClient(HttpClient httpClient, IOptions<LibertyPayOp
             """;
     }
 
-    private static LibertyPayRefundResult ParseRefundResponse(string responseText)
+    private static LibertyPayRefundResult ParseRefundResponse(string responseText, string requestUrl, string requestBody)
     {
         var document = XDocument.Parse(responseText);
         var resultElement = document.Descendants()
@@ -76,7 +97,9 @@ public class LibertyPayRefundClient(HttpClient httpClient, IOptions<LibertyPayOp
             statusCode.Trim(),
             int.TryParse(amountText, out var amount) ? amount : 0,
             transactionCode,
-            responseText);
+            responseText,
+            requestUrl,
+            requestBody);
     }
 
     private void EnsureConfigured()

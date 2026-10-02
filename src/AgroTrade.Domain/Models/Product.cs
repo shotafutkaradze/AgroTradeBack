@@ -23,6 +23,7 @@ public class Product
     public Category? Category { get; set; }
     public string? CategoryNames { get; set; }
     public string? SpecificationsJson { get; set; }
+    public bool IsHidden { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
