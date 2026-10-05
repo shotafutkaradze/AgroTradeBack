@@ -157,7 +157,14 @@ public class AgroTradeDbContext(DbContextOptions<AgroTradeDbContext> options) : 
             entity.Property(user => user.LastName).HasMaxLength(120);
             entity.Property(user => user.Email).HasMaxLength(240);
             entity.Property(user => user.Phone).HasMaxLength(100);
+            entity.Property(user => user.City).HasMaxLength(120);
+            entity.Property(user => user.Region).HasMaxLength(160);
+            entity.Property(user => user.Street).HasMaxLength(180);
+            entity.Property(user => user.Building).HasMaxLength(120);
+            entity.Property(user => user.AddressNote).HasMaxLength(300);
             entity.Property(user => user.PasswordHash).HasMaxLength(500);
+            entity.HasIndex(user => user.EmailVerificationToken);
+            entity.Property(user => user.EmailVerificationToken).HasMaxLength(120);
             entity.Property(user => user.Role)
                 .HasConversion(value => value.ToValue(), value => value.ToUserRole())
                 .HasMaxLength(40);

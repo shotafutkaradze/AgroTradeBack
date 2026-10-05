@@ -3,6 +3,7 @@ using AgroTrade.Contracts.Payments;
 using AgroTrade.Domain.Enums;
 using AgroTrade.Domain.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Security.Cryptography;
 using System.Text;
@@ -42,7 +43,9 @@ public class PaymentService(
     IAgroTradeDbContext dbContext,
     ILibertyPayRefundClient libertyPayRefundClient,
     IBogInstallmentClient bogInstallmentClient,
+    IOrderEmailService orderEmailService,
     IActivityLogService activityLogService,
+    ILogger<PaymentService> logger,
     IOptions<LibertyPayOptions> libertyPayOptions,
     IOptions<BogInstallmentOptions> bogInstallmentOptions) : IPaymentService
 {
@@ -253,6 +256,7 @@ public class PaymentService(
 
         var order = await dbContext.Orders
             .Include(order => order.Payments)
+            .Include(order => order.Items)
             .FirstOrDefaultAsync(order => order.OrderNumber == request.OrderCode, cancellationToken);
 
         if (order is null)
@@ -360,6 +364,11 @@ public class PaymentService(
             payment.Status.ToValue(),
             Details: $"bankStatus={request.Status}; transactioncode={request.TransactionCode}; amount={request.Amount}; paymethod={request.PayMethod}"),
             cancellationToken);
+
+        if (isCompleted)
+        {
+            await SendPaidOrderEmailAsync(order, cancellationToken);
+        }
 
         return BuildCallbackResponse("0", "Ok", request.TransactionCode);
     }
@@ -550,6 +559,7 @@ public class PaymentService(
         }
 
         var order = await dbContext.Orders
+            .Include(order => order.Items)
             .FirstOrDefaultAsync(order => order.LibertyPaymentOrderCode == paymentOrderCode, cancellationToken);
 
         if (order is null)
@@ -616,6 +626,11 @@ public class PaymentService(
             Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
             cancellationToken);
 
+        if (paymentStatus == PaymentStatus.Paid)
+        {
+            await SendPaidOrderEmailAsync(order, cancellationToken);
+        }
+
         return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
     }
 
@@ -630,6 +645,7 @@ public class PaymentService(
 
         var order = await dbContext.Orders
             .Include(order => order.Payments)
+            .Include(order => order.Items)
             .FirstOrDefaultAsync(order => order.OrderNumber == request.ShopOrderId, cancellationToken);
 
         if (order is null)
@@ -700,7 +716,54 @@ public class PaymentService(
             Details: $"bankStatus={request.Status}; bogOrder={request.OrderId}"),
             cancellationToken);
 
+        if (paymentStatus == PaymentStatus.Paid)
+        {
+            await SendPaidOrderEmailAsync(order, cancellationToken);
+        }
+
         return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
+    }
+
+    private async Task SendPaidOrderEmailAsync(Order order, CancellationToken cancellationToken)
+    {
+        var alreadySent = await dbContext.ActivityLogs.AnyAsync(log =>
+            log.OrderId == order.Id &&
+            log.Event == "paid_order_email_sent",
+            cancellationToken);
+        if (alreadySent)
+        {
+            return;
+        }
+
+        try
+        {
+            await orderEmailService.SendOrderCreatedAsync(OrderService.ToDto(order), cancellationToken);
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "success",
+                "order",
+                "paid_order_email_sent",
+                $"გადახდილი შეკვეთის email გაიგზავნა: {order.OrderNumber}",
+                order.Id,
+                order.OrderNumber,
+                order.PaymentMethod.ToValue(),
+                order.PaymentStatus.ToValue()),
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to send paid order email for {OrderNumber}", order.OrderNumber);
+            await activityLogService.AddAsync(new ActivityLogEntry(
+                "warning",
+                "order",
+                "paid_order_email_failed",
+                $"გადახდილი შეკვეთის email ვერ გაიგზავნა: {order.OrderNumber}",
+                order.Id,
+                order.OrderNumber,
+                order.PaymentMethod.ToValue(),
+                order.PaymentStatus.ToValue(),
+                Details: ex.Message),
+                cancellationToken);
+        }
     }
 
     private async Task AddPaymentIssueLogAsync(

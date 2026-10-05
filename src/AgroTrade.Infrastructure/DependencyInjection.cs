@@ -16,8 +16,11 @@ public static class DependencyInjection
             options.UseNpgsql(configuration.GetConnectionString("DefaultConnection")));
 
         services.AddScoped<IAgroTradeDbContext>(provider => provider.GetRequiredService<AgroTradeDbContext>());
+        services.Configure<SmtpEmailOptions>(configuration.GetSection("Email"));
         services.Configure<LibertyPayOptions>(configuration.GetSection("LibertyPay"));
         services.Configure<BogInstallmentOptions>(configuration.GetSection("BogInstallment"));
+        services.AddScoped<IOrderEmailService, SmtpOrderEmailService>();
+        services.AddScoped<IAccountEmailService, SmtpAccountEmailService>();
         services.AddHttpClient<ILibertyPayRefundClient, LibertyPayRefundClient>();
         services.AddHttpClient<IBogInstallmentClient, BogInstallmentClient>();
         services.AddSingleton<AppTokenService>();

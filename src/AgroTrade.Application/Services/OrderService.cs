@@ -3,6 +3,7 @@ using AgroTrade.Contracts.Orders;
 using AgroTrade.Domain.Enums;
 using AgroTrade.Domain.Models;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace AgroTrade.Application.Services;
 
@@ -15,7 +16,11 @@ public interface IOrderService
     Task<OrderDto?> UpdateStatusAsync(int id, UpdateOrderStatusRequest request, CancellationToken cancellationToken);
 }
 
-public class OrderService(IAgroTradeDbContext dbContext, IActivityLogService activityLogService) : IOrderService
+public class OrderService(
+    IAgroTradeDbContext dbContext,
+    IActivityLogService activityLogService,
+    IOrderEmailService orderEmailService,
+    ILogger<OrderService> logger) : IOrderService
 {
     public async Task<IReadOnlyList<OrderDto>> GetAsync(DateTimeOffset? from, DateTimeOffset? to, CancellationToken cancellationToken)
     {
@@ -89,7 +94,7 @@ public class OrderService(IAgroTradeDbContext dbContext, IActivityLogService act
             City = request.Delivery.City?.Trim() ?? string.Empty,
             Address = request.Delivery.Address?.Trim() ?? string.Empty,
             Note = string.IsNullOrWhiteSpace(request.Delivery.Note) ? null : request.Delivery.Note.Trim(),
-            DeliveryPrice = request.DeliveryPrice,
+            DeliveryPrice = 0,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -130,6 +135,7 @@ public class OrderService(IAgroTradeDbContext dbContext, IActivityLogService act
         }
 
         order.Subtotal = order.Items.Sum(item => item.LineTotal);
+        order.DeliveryPrice = CalculateDeliveryPrice(order.Subtotal, order.DeliveryMethod, order.City, order.Address);
         order.Total = order.Subtotal + order.DeliveryPrice;
 
         if (paymentMethod is PaymentMethod.Liberty or PaymentMethod.BogInstallmentPlan)
@@ -162,7 +168,31 @@ public class OrderService(IAgroTradeDbContext dbContext, IActivityLogService act
             Details: $"თანხა: {order.Total:0.##} ₾; მომხმარებელი: {order.CustomerFirstName} {order.CustomerLastName}"),
             cancellationToken);
 
-        return ToDto(order);
+        var orderDto = ToDto(order);
+        if (order.PaymentStatus != PaymentStatus.Pending)
+        {
+            try
+            {
+                await orderEmailService.SendOrderCreatedAsync(orderDto, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to send order email for {OrderNumber}", order.OrderNumber);
+                await activityLogService.AddAsync(new ActivityLogEntry(
+                    "warning",
+                    "order",
+                    "order_email_failed",
+                    $"შეკვეთის email ვერ გაიგზავნა: {order.OrderNumber}",
+                    order.Id,
+                    order.OrderNumber,
+                    order.PaymentMethod.ToValue(),
+                    order.PaymentStatus.ToValue(),
+                    Details: ex.Message),
+                    cancellationToken);
+            }
+        }
+
+        return orderDto;
     }
 
     public async Task<OrderDto?> UpdateStatusAsync(int id, UpdateOrderStatusRequest request, CancellationToken cancellationToken)
@@ -230,6 +260,27 @@ public class OrderService(IAgroTradeDbContext dbContext, IActivityLogService act
     {
         var nextId = await dbContext.Orders.CountAsync(cancellationToken) + 1;
         return $"AT-{DateTimeOffset.UtcNow:yyyyMMdd}-{nextId:0000}";
+    }
+
+    private static decimal CalculateDeliveryPrice(decimal subtotal, DeliveryMethod deliveryMethod, string? city, string? address)
+    {
+        if (deliveryMethod == DeliveryMethod.Pickup || subtotal > 300)
+        {
+            return 0;
+        }
+
+        var destination = $"{city} {address}".Trim();
+        if (destination.Contains("თბილის", StringComparison.OrdinalIgnoreCase))
+        {
+            return 6;
+        }
+
+        if (destination.Contains("სოფ", StringComparison.OrdinalIgnoreCase))
+        {
+            return 15;
+        }
+
+        return 10;
     }
 
     public static OrderDto ToDto(Order order)
