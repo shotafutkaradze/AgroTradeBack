@@ -61,6 +61,21 @@ public record BogInstallmentPaymentStartResponse(
     string ProviderStatus,
     string PaymentUrl);
 
+public record TbcInstallmentPaymentStartRequest(int? InstallmentMonth);
+
+public record TbcInstallmentPaymentStartResponse(
+    int OrderId,
+    string OrderNumber,
+    string ProviderOrderId,
+    string ProviderStatus,
+    string PaymentUrl);
+
+public record TbcInstallmentCallbackRequest(
+    string? Status,
+    string? OrderId,
+    string? ShopOrderId,
+    string? TransactionId);
+
 public record BogInstallmentCallbackRequest(
     string? Status,
     string? OrderId,

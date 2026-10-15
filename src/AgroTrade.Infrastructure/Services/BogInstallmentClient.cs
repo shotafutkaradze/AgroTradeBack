@@ -33,7 +33,7 @@ public class BogInstallmentClient(HttpClient httpClient, IOptions<BogInstallment
         {
             intent = "LOAN",
             installment_month = installmentMonth,
-            installment_type = installmentType,
+            installment_type = installmentType.ToUpperInvariant(),
             shop_order_id = order.OrderNumber,
             success_redirect_url = successUrl,
             fail_redirect_url = failUrl,
@@ -57,7 +57,7 @@ public class BogInstallmentClient(HttpClient httpClient, IOptions<BogInstallment
                 item_description = item.ProductName,
                 total_item_qty = item.Quantity,
                 item_vendor_code = item.ProductId?.ToString() ?? item.ProductSku ?? item.Id.ToString(),
-                product_image_url = item.ProductImageUrl,
+                product_image_url = string.IsNullOrWhiteSpace(item.ProductImageUrl) ? null : item.ProductImageUrl,
                 item_site_detail_url = (string?)null
             }).ToArray()
         };
@@ -92,10 +92,12 @@ public class BogInstallmentClient(HttpClient httpClient, IOptions<BogInstallment
 
     private async Task<string> GetTokenAsync(CancellationToken cancellationToken)
     {
-        var baseUrl = options.BaseUrl.TrimEnd('/');
+        var tokenUrl = string.IsNullOrWhiteSpace(options.TokenUrl)
+            ? $"{options.BaseUrl.TrimEnd('/')}/v1/oauth2/token"
+            : options.TokenUrl.Trim();
         var credentials = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{options.ClientId.Trim()}:{options.SecretKey.Trim()}"));
 
-        using var request = new HttpRequestMessage(HttpMethod.Post, $"{baseUrl}/v1/oauth2/token");
+        using var request = new HttpRequestMessage(HttpMethod.Post, tokenUrl);
         request.Headers.Authorization = new AuthenticationHeaderValue("Basic", credentials);
         request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
         {

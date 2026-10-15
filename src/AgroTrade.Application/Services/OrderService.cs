@@ -82,7 +82,7 @@ public class OrderService(
             AppUserId = request.UserId,
             Status = OrderStatus.New,
             PaymentMethod = paymentMethod,
-            PaymentStatus = paymentMethod is PaymentMethod.Liberty or PaymentMethod.BogInstallmentPlan
+            PaymentStatus = paymentMethod is PaymentMethod.Liberty or PaymentMethod.BogInstallmentPlan or PaymentMethod.BogPieceByPiece or PaymentMethod.TbcInstallment
                 ? PaymentStatus.Pending
                 : PaymentStatus.Unpaid,
             DeliveryMethod = deliveryMethod,
@@ -138,13 +138,16 @@ public class OrderService(
         order.DeliveryPrice = CalculateDeliveryPrice(order.Subtotal, order.DeliveryMethod, order.City, order.Address);
         order.Total = order.Subtotal + order.DeliveryPrice;
 
-        if (paymentMethod is PaymentMethod.Liberty or PaymentMethod.BogInstallmentPlan)
+        if (paymentMethod is PaymentMethod.Liberty or PaymentMethod.BogInstallmentPlan or PaymentMethod.BogPieceByPiece or PaymentMethod.TbcInstallment)
         {
             order.Payments.Add(new Payment
             {
-                Provider = paymentMethod == PaymentMethod.Liberty
-                    ? PaymentProvider.LibertyPay
-                    : PaymentProvider.BogInstallment,
+                Provider = paymentMethod switch
+                {
+                    PaymentMethod.Liberty => PaymentProvider.LibertyPay,
+                    PaymentMethod.TbcInstallment => PaymentProvider.TbcInstallment,
+                    _ => PaymentProvider.BogInstallment
+                },
                 Method = paymentMethod,
                 Status = PaymentStatus.Pending,
                 Amount = order.Total,

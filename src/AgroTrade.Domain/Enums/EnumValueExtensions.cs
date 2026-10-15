@@ -22,12 +22,14 @@ public static class EnumValueExtensions
         PaymentMethod.Liberty => "liberty",
         PaymentMethod.BogPieceByPiece => "bog_piece_by_piece",
         PaymentMethod.BogInstallmentPlan => "bog_installment_plan",
+        PaymentMethod.TbcInstallment => "tbc_installment",
         _ => "cash"
     };
 
     public static string ToValue(this PaymentProvider value) => value switch
     {
         PaymentProvider.BogInstallment => "bog_installment",
+        PaymentProvider.TbcInstallment => "tbc_installment",
         _ => "liberty_pay"
     };
 
@@ -108,12 +110,16 @@ public static class EnumValueExtensions
         "bog-parts" => PaymentMethod.BogPieceByPiece,
         "bog_installment_plan" => PaymentMethod.BogInstallmentPlan,
         "bog-installment" => PaymentMethod.BogInstallmentPlan,
+        "tbc" => PaymentMethod.TbcInstallment,
+        "tbc_installment" => PaymentMethod.TbcInstallment,
+        "tbc-installment" => PaymentMethod.TbcInstallment,
         _ => PaymentMethod.Cash
     };
 
     public static PaymentProvider ToPaymentProvider(this string? value) => Normalize(value) switch
     {
         "bog_installment" => PaymentProvider.BogInstallment,
+        "tbc_installment" => PaymentProvider.TbcInstallment,
         _ => PaymentProvider.LibertyPay
     };
 

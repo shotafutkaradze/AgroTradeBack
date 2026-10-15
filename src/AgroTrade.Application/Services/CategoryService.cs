@@ -47,6 +47,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
             Name = request.Name.Trim(),
             Slug = await CreateUniqueSlugAsync(request.Name, null, cancellationToken),
             ParentId = request.ParentId,
+            ImageUrl = Clean(request.ImageUrl),
             SortOrder = request.SortOrder,
             CreatedAt = now,
             UpdatedAt = now
@@ -77,6 +78,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
         category.Name = request.Name.Trim();
         category.Slug = await CreateUniqueSlugAsync(request.Name, id, cancellationToken);
         category.ParentId = request.ParentId;
+        category.ImageUrl = Clean(request.ImageUrl);
         category.SortOrder = request.SortOrder;
         category.UpdatedAt = DateTimeOffset.UtcNow;
 
@@ -130,6 +132,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
             category.Name,
             category.Slug,
             category.SortOrder,
+            category.ImageUrl,
             productCounts.GetValueOrDefault(category.Id),
             category.Children
                 .OrderBy(child => child.SortOrder)
@@ -150,6 +153,11 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
         }
 
         return slug;
+    }
+
+    private static string? Clean(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
     private static string ToSlug(string value)

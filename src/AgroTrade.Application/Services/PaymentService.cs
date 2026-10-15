@@ -34,8 +34,15 @@ public interface IPaymentService
         int orderId,
         BogInstallmentPaymentStartRequest request,
         CancellationToken cancellationToken);
+    Task<TbcInstallmentPaymentStartResponse?> StartTbcInstallmentAsync(
+        int orderId,
+        TbcInstallmentPaymentStartRequest request,
+        CancellationToken cancellationToken);
     Task<PaymentStatusDto?> HandleBogInstallmentCallbackAsync(
         BogInstallmentCallbackRequest request,
+        CancellationToken cancellationToken);
+    Task<PaymentStatusDto?> HandleTbcInstallmentCallbackAsync(
+        TbcInstallmentCallbackRequest request,
         CancellationToken cancellationToken);
 }
 
@@ -43,6 +50,7 @@ public class PaymentService(
     IAgroTradeDbContext dbContext,
     ILibertyPayRefundClient libertyPayRefundClient,
     IBogInstallmentClient bogInstallmentClient,
+    ITbcInstallmentClient tbcInstallmentClient,
     IOrderEmailService orderEmailService,
     IActivityLogService activityLogService,
     ILogger<PaymentService> logger,
@@ -152,13 +160,16 @@ public class PaymentService(
             return null;
         }
 
-        if (order.PaymentMethod != PaymentMethod.BogInstallmentPlan)
+        if (order.PaymentMethod is not PaymentMethod.BogInstallmentPlan and not PaymentMethod.BogPieceByPiece)
         {
-            throw new InvalidOperationException("Order payment method is not BOG installment.");
+            throw new InvalidOperationException("Order payment method is not BOG.");
         }
 
-        var month = request.InstallmentMonth.GetValueOrDefault(bogInstallmentOptions.DefaultInstallmentMonth);
-        var type = string.IsNullOrWhiteSpace(request.InstallmentType)
+        var isPieceByPiece = order.PaymentMethod == PaymentMethod.BogPieceByPiece;
+        var month = request.InstallmentMonth.GetValueOrDefault(isPieceByPiece ? 4 : bogInstallmentOptions.DefaultInstallmentMonth);
+        var type = isPieceByPiece
+            ? "ZERO"
+            : string.IsNullOrWhiteSpace(request.InstallmentType)
             ? bogInstallmentOptions.DefaultInstallmentType
             : request.InstallmentType.Trim();
 
@@ -180,7 +191,7 @@ public class PaymentService(
             {
                 OrderId = order.Id,
                 Provider = PaymentProvider.BogInstallment,
-                Method = PaymentMethod.BogInstallmentPlan,
+                Method = order.PaymentMethod,
                 CreatedAt = now
             };
             dbContext.Payments.Add(payment);
@@ -197,8 +208,8 @@ public class PaymentService(
         await activityLogService.AddAsync(new ActivityLogEntry(
             "info",
             "payment",
-            "bog_installment_started",
-            $"BOG განვადება დაიწყო შეკვეთაზე {order.OrderNumber}",
+            isPieceByPiece ? "bog_bnpl_started" : "bog_installment_started",
+            $"{(isPieceByPiece ? "BOG ნაწილ-ნაწილ" : "BOG განვადება")} დაიწყო შეკვეთაზე {order.OrderNumber}",
             order.Id,
             order.OrderNumber,
             "BOG",
@@ -212,6 +223,76 @@ public class PaymentService(
             bogOrder.OrderId,
             bogOrder.Status,
             bogOrder.RedirectUrl);
+    }
+
+    public async Task<TbcInstallmentPaymentStartResponse?> StartTbcInstallmentAsync(
+        int orderId,
+        TbcInstallmentPaymentStartRequest request,
+        CancellationToken cancellationToken)
+    {
+        var order = await dbContext.Orders
+            .Include(order => order.Items)
+            .FirstOrDefaultAsync(order => order.Id == orderId, cancellationToken);
+        if (order is null)
+        {
+            return null;
+        }
+
+        if (order.PaymentMethod != PaymentMethod.TbcInstallment)
+        {
+            throw new InvalidOperationException("Order payment method is not TBC installment.");
+        }
+
+        var tbcOrder = await tbcInstallmentClient.CreateOrderAsync(order, request.InstallmentMonth, cancellationToken);
+        var now = DateTimeOffset.UtcNow;
+        order.PaymentStatus = PaymentStatus.Pending;
+        order.UpdatedAt = now;
+
+        var payment = await dbContext.Payments
+            .OrderByDescending(payment => payment.CreatedAt)
+            .FirstOrDefaultAsync(payment =>
+                payment.OrderId == order.Id &&
+                payment.Provider == PaymentProvider.TbcInstallment,
+                cancellationToken);
+
+        if (payment is null)
+        {
+            payment = new Payment
+            {
+                OrderId = order.Id,
+                Provider = PaymentProvider.TbcInstallment,
+                Method = PaymentMethod.TbcInstallment,
+                CreatedAt = now
+            };
+            dbContext.Payments.Add(payment);
+        }
+
+        payment.Status = PaymentStatus.Pending;
+        payment.Amount = order.Total;
+        payment.Currency = "GEL";
+        payment.ProviderOrderId = tbcOrder.OrderId;
+        payment.ProviderStatus = tbcOrder.Status;
+        payment.UpdatedAt = now;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            "info",
+            "payment",
+            "tbc_installment_started",
+            $"TBC განვადება დაიწყო შეკვეთაზე {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "TBC",
+            payment.Status.ToValue(),
+            Details: $"TBC order: {tbcOrder.OrderId}; თანხა: {order.Total:0.##} ₾"),
+            cancellationToken);
+
+        return new TbcInstallmentPaymentStartResponse(
+            order.Id,
+            order.OrderNumber,
+            tbcOrder.OrderId,
+            tbcOrder.Status,
+            tbcOrder.RedirectUrl);
     }
 
     public Task<PaymentStatusDto?> HandleLibertyDeclineAsync(string? paymentOrderCode, CancellationToken cancellationToken)
@@ -714,6 +795,101 @@ public class PaymentService(
             "BOG",
             paymentStatus.ToValue(),
             Details: $"bankStatus={request.Status}; bogOrder={request.OrderId}"),
+            cancellationToken);
+
+        if (paymentStatus == PaymentStatus.Paid)
+        {
+            await SendPaidOrderEmailAsync(order, cancellationToken);
+        }
+
+        return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
+    }
+
+    public async Task<PaymentStatusDto?> HandleTbcInstallmentCallbackAsync(
+        TbcInstallmentCallbackRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.ShopOrderId) && string.IsNullOrWhiteSpace(request.OrderId))
+        {
+            return null;
+        }
+
+        var order = await dbContext.Orders
+            .Include(order => order.Payments)
+            .Include(order => order.Items)
+            .FirstOrDefaultAsync(order =>
+                    order.OrderNumber == request.ShopOrderId ||
+                    order.Payments.Any(payment =>
+                        payment.Provider == PaymentProvider.TbcInstallment &&
+                        payment.ProviderOrderId == request.OrderId),
+                cancellationToken);
+
+        if (order is null)
+        {
+            return null;
+        }
+
+        var status = request.Status?.Trim().ToLowerInvariant();
+        var paymentStatus = status switch
+        {
+            "success" or "approved" or "completed" or "paid" => PaymentStatus.Paid,
+            "cancel" or "cancelled" or "canceled" => PaymentStatus.Cancelled,
+            _ => PaymentStatus.Failed
+        };
+        var orderStatus = paymentStatus switch
+        {
+            PaymentStatus.Paid => OrderStatus.Processing,
+            PaymentStatus.Cancelled => OrderStatus.Cancelled,
+            PaymentStatus.Failed => OrderStatus.Cancelled,
+            _ => order.Status
+        };
+        var now = DateTimeOffset.UtcNow;
+
+        order.PaymentStatus = paymentStatus;
+        order.Status = orderStatus;
+        order.UpdatedAt = now;
+
+        var payment = order.Payments
+            .Where(payment => payment.Provider == PaymentProvider.TbcInstallment)
+            .OrderByDescending(payment => payment.CreatedAt)
+            .FirstOrDefault();
+
+        if (payment is null)
+        {
+            payment = new Payment
+            {
+                OrderId = order.Id,
+                Provider = PaymentProvider.TbcInstallment,
+                Method = PaymentMethod.TbcInstallment,
+                Amount = order.Total,
+                Currency = "GEL",
+                CreatedAt = now
+            };
+            dbContext.Payments.Add(payment);
+        }
+
+        payment.Status = paymentStatus;
+        payment.ProviderOrderId = string.IsNullOrWhiteSpace(request.OrderId) ? payment.ProviderOrderId : request.OrderId;
+        payment.ProviderStatus = request.Status;
+        payment.ProviderTransactionCode = string.IsNullOrWhiteSpace(request.TransactionId) ? request.OrderId : request.TransactionId;
+        payment.CompletedAt = paymentStatus is PaymentStatus.Paid or PaymentStatus.Failed or PaymentStatus.Cancelled
+            ? now
+            : null;
+        payment.UpdatedAt = now;
+
+        await dbContext.SaveChangesAsync(cancellationToken);
+        await activityLogService.AddAsync(new ActivityLogEntry(
+            paymentStatus == PaymentStatus.Paid ? "success" : "warning",
+            "payment",
+            paymentStatus == PaymentStatus.Paid ? "tbc_installment_paid" : "tbc_installment_failed",
+            paymentStatus == PaymentStatus.Paid
+                ? $"TBC განვადება წარმატებულია: {order.OrderNumber}"
+                : $"TBC განვადება ვერ დასრულდა: {order.OrderNumber}",
+            order.Id,
+            order.OrderNumber,
+            "TBC",
+            paymentStatus.ToValue(),
+            Details: $"bankStatus={request.Status}; tbcOrder={request.OrderId}; transaction={request.TransactionId}"),
             cancellationToken);
 
         if (paymentStatus == PaymentStatus.Paid)

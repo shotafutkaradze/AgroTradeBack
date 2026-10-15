@@ -19,10 +19,12 @@ public static class DependencyInjection
         services.Configure<SmtpEmailOptions>(configuration.GetSection("Email"));
         services.Configure<LibertyPayOptions>(configuration.GetSection("LibertyPay"));
         services.Configure<BogInstallmentOptions>(configuration.GetSection("BogInstallment"));
+        services.Configure<TbcInstallmentOptions>(configuration.GetSection("TbcInstallment"));
         services.AddScoped<IOrderEmailService, SmtpOrderEmailService>();
         services.AddScoped<IAccountEmailService, SmtpAccountEmailService>();
         services.AddHttpClient<ILibertyPayRefundClient, LibertyPayRefundClient>();
         services.AddHttpClient<IBogInstallmentClient, BogInstallmentClient>();
+        services.AddHttpClient<ITbcInstallmentClient, TbcInstallmentClient>();
         services.AddSingleton<AppTokenService>();
         services.AddSingleton<IAppTokenService>(provider => provider.GetRequiredService<AppTokenService>());
 

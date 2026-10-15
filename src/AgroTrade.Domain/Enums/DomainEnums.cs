@@ -21,6 +21,7 @@ public enum PaymentMethod
     Liberty,
     BogPieceByPiece,
     BogInstallmentPlan,
+    TbcInstallment,
     
 }
 
@@ -39,7 +40,8 @@ public enum PaymentStatus
 public enum PaymentProvider
 {
     LibertyPay,
-    BogInstallment
+    BogInstallment,
+    TbcInstallment
 }
 
 public enum DeliveryMethod

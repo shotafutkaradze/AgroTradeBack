@@ -347,7 +347,7 @@ public class AuthService(
     {
         var baseUrl = configuration["Auth:EmailVerificationUrl"]
             ?? configuration["BogInstallment:FrontendReturnUrl"]
-            ?? "http://localhost:5173/AgroTradefrontend/";
+            ?? "http://localhost:5173/";
         var separator = baseUrl.Contains('?') ? "&" : "?";
         return $"{baseUrl}{separator}verifyEmail={Uri.EscapeDataString(token)}";
     }

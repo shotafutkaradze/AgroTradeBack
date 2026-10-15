@@ -13,6 +13,6 @@ namespace AgroTrade.Application.Services
         public string BaseUrl { get; set; } = "https://api.bog.ge"; 
         public string RedirectUrl { get; set; } = "https://yourdomain.com/api/payments/bog/return";
         public string CallbackUrl { get; set; } = "https://yourdomain.com/api/payments/bog/callback";
-        public string FrontendReturnUrl { get; set; } = "http://localhost:5173/AgroTradefrontend/";
+        public string FrontendReturnUrl { get; set; } = "http://localhost:5173/";
     }
 }

@@ -10,6 +10,7 @@ public class LibertyPayOptions
     public string TestMode { get; set; } = "1";
     public string PublicApiBaseUrl { get; set; } = string.Empty;
     public string FrontendReturnUrl { get; set; } = string.Empty;
-    public string ServiceUrl { get; set; } = "http://pay.ge:1202/PaygeService.svc";
+    public string ServiceUrl { get; set; } = "http://merchant.pay.ge:1202/PaygeService.svc";
+    //public string ServiceUrl { get; set; } = "http://pay.ge:1202/PaygeService.svc";
     public string RefundSoapAction { get; set; } = "http://tempuri.org/IPaygeService/Refund";
 }

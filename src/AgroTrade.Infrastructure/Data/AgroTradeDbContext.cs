@@ -57,6 +57,7 @@ public class AgroTradeDbContext(DbContextOptions<AgroTradeDbContext> options) : 
             entity.HasIndex(category => category.Slug).IsUnique();
             entity.Property(category => category.Name).HasMaxLength(300);
             entity.Property(category => category.Slug).HasMaxLength(320);
+            entity.Property(category => category.ImageUrl).HasMaxLength(1000);
 
             entity.HasOne(category => category.Parent)
                 .WithMany(category => category.Children)

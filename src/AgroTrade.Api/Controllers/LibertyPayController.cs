@@ -95,7 +95,7 @@ public class LibertyPayController(
     private string BuildFrontendReturnUrl(string paymentResult, string? orderNumber)
     {
         var baseUrl = string.IsNullOrWhiteSpace(libertyPayOptions.FrontendReturnUrl)
-            ? "http://localhost:5173/AgroTradefrontend/"
+            ? "http://localhost:5173/"
             : libertyPayOptions.FrontendReturnUrl.Trim();
         var separator = baseUrl.Contains('?') ? '&' : '?';
         var orderPart = string.IsNullOrWhiteSpace(orderNumber)
