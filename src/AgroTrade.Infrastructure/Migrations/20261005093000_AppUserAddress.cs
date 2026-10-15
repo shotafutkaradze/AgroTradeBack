@@ -1,9 +1,13 @@
+
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using AgroTrade.Infrastructure.Data;
 
 #nullable disable
 
 namespace AgroTrade.Infrastructure.Migrations
 {
+    [DbContext(typeof(AgroTradeDbContext))]
     [Migration("20261005093000_AppUserAddress")]
     public partial class AppUserAddress : Migration
     {
@@ -37,11 +41,20 @@ namespace AgroTrade.Infrastructure.Migrations
 
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropColumn(name: "AddressNote", table: "AppUsers");
-            migrationBuilder.DropColumn(name: "Building", table: "AppUsers");
-            migrationBuilder.DropColumn(name: "Street", table: "AppUsers");
-            migrationBuilder.DropColumn(name: "Region", table: "AppUsers");
-            migrationBuilder.DropColumn(name: "City", table: "AppUsers");
+            migrationBuilder.DropColumn(
+                name: "AddressNote", table: "AppUsers");
+
+            migrationBuilder.DropColumn(
+                name: "Building", table: "AppUsers");
+
+            migrationBuilder.DropColumn(
+                name: "Street", table: "AppUsers");
+
+            migrationBuilder.DropColumn(
+                name: "Region", table: "AppUsers");
+
+            migrationBuilder.DropColumn(
+                name: "City", table: "AppUsers");
         }
     }
 }

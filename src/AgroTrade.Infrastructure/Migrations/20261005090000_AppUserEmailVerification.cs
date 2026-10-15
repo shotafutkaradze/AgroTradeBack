@@ -1,9 +1,13 @@
+
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using AgroTrade.Infrastructure.Data;
 
 #nullable disable
 
 namespace AgroTrade.Infrastructure.Migrations
 {
+    [DbContext(typeof(AgroTradeDbContext))]
     [Migration("20261005090000_AppUserEmailVerification")]
     public partial class AppUserEmailVerification : Migration
     {
