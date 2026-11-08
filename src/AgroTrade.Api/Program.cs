@@ -1,3 +1,4 @@
+
 using AgroTrade.Application;
 using AgroTrade.Api;
 using AgroTrade.Domain.Enums;
@@ -7,25 +8,60 @@ using Microsoft.AspNetCore.Authentication;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var allowedOrigins = builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>() ?? [];
-var webRootPath = builder.Environment.WebRootPath ?? Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
+
+
+var webRootPath = builder.Environment.WebRootPath
+    ?? Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
+
 builder.Environment.WebRootPath = webRootPath;
-Directory.CreateDirectory(Path.Combine(webRootPath, "uploads", "products"));
+
+Directory.CreateDirectory(
+    Path.Combine(webRootPath, "uploads", "products")
+);
+
+
 
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddApplication();
 
+
+
 builder.Services
     .AddAuthentication("Bearer")
-    .AddScheme<AuthenticationSchemeOptions, AppTokenAuthenticationHandler>("Bearer", _ => { });
+    .AddScheme<AuthenticationSchemeOptions,
+        AppTokenAuthenticationHandler>("Bearer", _ => { });
+
+
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy(AuthorizationPolicies.AdminOrManager, policy =>
-        policy.RequireRole(UserRole.Admin.ToValue(), UserRole.Manager.ToValue()));
+    options.AddPolicy(
+        AuthorizationPolicies.AdminOrManager,
+        policy => policy.RequireRole(
+            UserRole.Admin.ToValue(),
+            UserRole.Manager.ToValue()
+        )
+    );
+});
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("FixtopCors", policy =>
+    {
+        policy
+            .WithOrigins(
+                "https://fixtop.ge",
+                "https://www.fixtop.ge",
+                "http://fixtop.ge",
+                "http://www.fixtop.ge"
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+    });
 });
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new()
@@ -36,20 +72,10 @@ builder.Services.AddSwaggerGen(options =>
     });
 });
 
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("Frontend", policy =>
-    {
-        policy
-            .WithOrigins(allowedOrigins)
-            .AllowAnyHeader()
-            .AllowAnyMethod();
-    });
-});
-
 var app = builder.Build();
 
 await app.Services.MigrateDatabaseAsync();
+
 
 if (app.Environment.IsDevelopment())
 {
@@ -61,7 +87,10 @@ app.UseHttpsRedirection();
 
 app.UseStaticFiles();
 
-app.UseCors("Frontend");
+app.UseRouting();
+
+// CORS must run before authentication
+app.UseCors("FixtopCors");
 
 app.UseAuthentication();
 app.UseAuthorization();
