@@ -5,21 +5,13 @@ using AgroTrade.Domain.Enums;
 using AgroTrade.Infrastructure;
 using AgroTrade.Infrastructure.Services;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 
 
 
-var webRootPath = builder.Environment.WebRootPath
-    ?? Path.Combine(builder.Environment.ContentRootPath, "wwwroot");
-
-builder.Environment.WebRootPath = webRootPath;
-
-Directory.CreateDirectory(
-    Path.Combine(webRootPath, "uploads", "products")
-);
-
-
+builder.Services.AddSingleton<UploadStorage>();
 
 builder.Services.AddInfrastructure(builder.Configuration);
 builder.Services.AddApplication();
@@ -56,6 +48,8 @@ builder.Services.AddCors(options =>
             )
             .AllowAnyHeader()
             .AllowAnyMethod();
+        if (builder.Environment.IsDevelopment())
+            policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173");
     });
 });
 
@@ -74,6 +68,10 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
+var uploadStorage = app.Services.GetRequiredService<UploadStorage>();
+var copiedUploads = uploadStorage.Initialize();
+app.Logger.LogInformation("Upload storage ready at {UploadsPath}; copied {Count} legacy files", uploadStorage.RootPath, copiedUploads);
+
 await app.Services.MigrateDatabaseAsync();
 
 
@@ -85,6 +83,11 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
+app.UseStaticFiles(new StaticFileOptions
+{
+    FileProvider = new PhysicalFileProvider(uploadStorage.RootPath),
+    RequestPath = "/uploads"
+});
 app.UseStaticFiles();
 
 app.UseRouting();

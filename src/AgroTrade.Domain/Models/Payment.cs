@@ -4,6 +4,12 @@ namespace AgroTrade.Domain.Models;
 
 public class Payment
 {
+    public Guid? CheckoutIdempotencyKey { get; set; }
+    public string? CheckoutTokenHash { get; set; }
+    public int? InstallmentMonth { get; set; }
+    public string? InstallmentType { get; set; }
+    public string? RedirectUrl { get; set; }
+    public long Version { get; set; }
     public int Id { get; set; }
     public int OrderId { get; set; }
     public Order? Order { get; set; }

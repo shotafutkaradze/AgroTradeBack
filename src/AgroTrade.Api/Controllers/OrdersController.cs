@@ -12,6 +12,13 @@ namespace AgroTrade.Api.Controllers;
 [Route("api/[controller]")]
 public class OrdersController(IOrderService orderService) : ControllerBase
 {
+    [HttpPost("bog-quote")]
+    public async Task<IActionResult> BogQuote(CreateOrderRequest request, CancellationToken cancellationToken)
+    {
+        try { return Ok(await orderService.QuoteBogAsync(request, cancellationToken)); }
+        catch (ArgumentException exception) { return BadRequest(new { message = exception.Message }); }
+    }
+
     [HttpGet]
     [Authorize(Policy = AuthorizationPolicies.AdminOrManager)]
     public async Task<IActionResult> Get([FromQuery] DateTimeOffset? from, [FromQuery] DateTimeOffset? to, CancellationToken cancellationToken)
@@ -46,6 +53,8 @@ public class OrdersController(IOrderService orderService) : ControllerBase
     {
         try
         {
+            if (request.PaymentMethod is "bog-installment" or "bog-parts" or "bog_installment_plan" or "bog_piece_by_piece" or "liberty")
+                request = request with { UserId = int.TryParse(User.FindFirstValue(ClaimTypes.NameIdentifier), out var userId) ? userId : null };
             var order = await orderService.CreateAsync(request, cancellationToken);
             return CreatedAtAction(nameof(GetById), new { id = order.Id }, order);
         }

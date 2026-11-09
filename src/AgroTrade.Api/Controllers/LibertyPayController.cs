@@ -2,6 +2,9 @@ using AgroTrade.Application.Services;
 using AgroTrade.Contracts.Payments;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.EntityFrameworkCore;
+using AgroTrade.Api;
 
 namespace AgroTrade.Api.Controllers;
 
@@ -28,6 +31,20 @@ public class LibertyPayController(
         {
             return BadRequest(new { message = exception.Message });
         }
+        catch (UnauthorizedAccessException) { return Unauthorized(); }
+        catch (DbUpdateConcurrencyException) { return Conflict(new { message = "გადახდა ახლდება. სცადეთ ხელახლა." }); }
+    }
+
+    [HttpGet("orders/{orderId:int}/status")]
+    [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
+    public async Task<IActionResult> Status(int orderId, [FromHeader(Name = "X-Payment-Token")] string? token, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await paymentService.GetLibertyStatusAsync(orderId, token, cancellationToken);
+            return result is null ? NotFound() : Ok(result);
+        }
+        catch (UnauthorizedAccessException) { return Unauthorized(); }
     }
 
     [HttpGet("approve")]
@@ -61,11 +78,16 @@ public class LibertyPayController(
     public async Task<IActionResult> Callback(CancellationToken cancellationToken)
     {
         var request = await BuildCallbackRequestAsync();
-        var result = await paymentService.HandleLibertyCallbackAsync(request, cancellationToken);
-        return Content(result.Xml, "application/xml");
+        try
+        {
+            var result = await paymentService.HandleLibertyCallbackAsync(request, cancellationToken);
+            return Content(result.Xml, "application/xml");
+        }
+        catch (DbUpdateConcurrencyException) { return StatusCode(503); }
     }
 
     [HttpPost("orders/{orderId:int}/refund")]
+    [Authorize(Policy = AuthorizationPolicies.AdminOrManager)]
     public async Task<IActionResult> RefundPayment(
         int orderId,
         RefundPaymentRequest request,
@@ -80,6 +102,7 @@ public class LibertyPayController(
         {
             return BadRequest(new { message = exception.Message });
         }
+        catch (DbUpdateConcurrencyException) { return Conflict(new { message = "დაბრუნების მოთხოვნა უკვე მუშავდება." }); }
     }
 
     private async Task<IActionResult> HandleReturnAsync(
@@ -89,7 +112,13 @@ public class LibertyPayController(
         CancellationToken cancellationToken)
     {
         var result = await handler(paymentOrderCode, cancellationToken);
-        return Redirect(BuildFrontendReturnUrl(result is null ? "error" : paymentResult, result?.OrderNumber ?? paymentOrderCode));
+        var confirmedResult = result?.PaymentStatus switch
+        {
+            "paid" => "success",
+            "failed" or "cancelled" or "refunded" or "partially_refunded" => "error",
+            _ => "pending"
+        };
+        return Redirect(BuildFrontendReturnUrl(result is null ? "error" : confirmedResult, result?.OrderNumber ?? paymentOrderCode));
     }
 
     private string BuildFrontendReturnUrl(string paymentResult, string? orderNumber)
@@ -101,7 +130,7 @@ public class LibertyPayController(
         var orderPart = string.IsNullOrWhiteSpace(orderNumber)
             ? string.Empty
             : $"&order={Uri.EscapeDataString(orderNumber)}";
-        return $"{baseUrl}{separator}payment={Uri.EscapeDataString(paymentResult)}{orderPart}";
+        return $"{baseUrl}{separator}provider=liberty&payment={Uri.EscapeDataString(paymentResult)}{orderPart}";
     }
 
     private async Task<LibertyPayCallbackRequest> BuildCallbackRequestAsync()

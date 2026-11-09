@@ -9,6 +9,7 @@ namespace AgroTrade.Application.Services;
 
 public interface IOrderService
 {
+    Task<OrderQuoteDto> QuoteBogAsync(CreateOrderRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<OrderDto>> GetAsync(DateTimeOffset? from, DateTimeOffset? to, CancellationToken cancellationToken);
     Task<OrderDto?> GetByIdAsync(int id, CancellationToken cancellationToken);
     Task<IReadOnlyList<OrderDto>> GetByUserAsync(int userId, CancellationToken cancellationToken);
@@ -22,6 +23,30 @@ public class OrderService(
     IOrderEmailService orderEmailService,
     ILogger<OrderService> logger) : IOrderService
 {
+    public async Task<OrderQuoteDto> QuoteBogAsync(CreateOrderRequest request, CancellationToken cancellationToken)
+    {
+        ValidateCreateRequest(request);
+        if (request.PaymentMethod.ToPaymentMethod() is not PaymentMethod.BogInstallmentPlan and not PaymentMethod.BogPieceByPiece)
+            throw new ArgumentException("BOG payment method required.");
+        var ids = request.Items.Select(item => item.ProductId ?? 0).Distinct().ToArray();
+        var products = await dbContext.Products.AsNoTracking().Where(product => ids.Contains(product.Id))
+            .ToDictionaryAsync(product => product.Id, cancellationToken);
+        decimal subtotal = 0;
+        foreach (var group in request.Items.GroupBy(item => item.ProductId))
+        {
+            if (!group.Key.HasValue || !products.TryGetValue(group.Key.Value, out var product) || product.IsHidden ||
+                product.StockStatus == StockStatus.OutOfStock || group.Any(item => item.Quantity <= 0))
+                throw new ArgumentException("BOG checkout requires available products.");
+            var quantity = group.Sum(item => (long)item.Quantity);
+            var price = product.Price ?? product.RegularPrice ?? product.SalePrice ?? 0;
+            if (price <= 0 || (product.StockQuantity.HasValue && quantity > product.StockQuantity.Value))
+                throw new ArgumentException("BOG checkout requires valid prices and available quantities.");
+            subtotal += price * quantity;
+        }
+        var delivery = CalculateDeliveryPrice(subtotal, request.Delivery.Method.ToDeliveryMethod(), request.Delivery.City, request.Delivery.Address);
+        return new OrderQuoteDto(subtotal, delivery, subtotal + delivery);
+    }
+
     public async Task<IReadOnlyList<OrderDto>> GetAsync(DateTimeOffset? from, DateTimeOffset? to, CancellationToken cancellationToken)
     {
         var periodTo = (to ?? DateTimeOffset.UtcNow).ToUniversalTime();
@@ -75,10 +100,25 @@ public class OrderService(
 
         var now = DateTimeOffset.UtcNow;
         var paymentMethod = request.PaymentMethod.ToPaymentMethod();
+        var isBog = paymentMethod is PaymentMethod.BogInstallmentPlan or PaymentMethod.BogPieceByPiece;
+        var trustedPayment = isBog || paymentMethod == PaymentMethod.Liberty;
+        var checkoutToken = trustedPayment ? BogCheckoutSecurity.CreateToken() : null;
+        if (trustedPayment)
+        {
+            foreach (var group in request.Items.GroupBy(item => item.ProductId))
+            {
+                if (!group.Key.HasValue || !products.TryGetValue(group.Key.Value, out var product) ||
+                    product.IsHidden || product.StockStatus == StockStatus.OutOfStock ||
+                    (product.Price ?? product.RegularPrice ?? product.SalePrice ?? 0) <= 0 ||
+                    group.Any(item => item.Quantity <= 0) ||
+                    (product.StockQuantity.HasValue && group.Sum(item => (long)item.Quantity) > product.StockQuantity.Value))
+                    throw new ArgumentException("BOG checkout requires available products with valid database prices and quantities.");
+            }
+        }
         var deliveryMethod = request.Delivery.Method.ToDeliveryMethod();
         var order = new Order
         {
-            OrderNumber = await BuildOrderNumberAsync(cancellationToken),
+            OrderNumber = trustedPayment ? $"AT-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..12]}" : await BuildOrderNumberAsync(cancellationToken),
             AppUserId = request.UserId,
             Status = OrderStatus.New,
             PaymentMethod = paymentMethod,
@@ -101,7 +141,7 @@ public class OrderService(
 
         foreach (var item in request.Items)
         {
-            if (item.Quantity <= 0 || item.UnitPrice < 0)
+            if (item.Quantity <= 0 || (!trustedPayment && item.UnitPrice < 0))
             {
                 throw new ArgumentException("Order item quantity and price must be valid.");
             }
@@ -121,16 +161,17 @@ public class OrderService(
                 product.UpdatedAt = now;
             }
 
+            var unitPrice = trustedPayment ? product!.Price ?? product.RegularPrice ?? product.SalePrice!.Value : item.UnitPrice;
             order.Items.Add(new OrderItem
             {
                 ProductId = product?.Id ?? item.ProductId,
-                ProductName = string.IsNullOrWhiteSpace(item.ProductName) ? product?.Name ?? "Product" : item.ProductName.Trim(),
+                ProductName = trustedPayment ? product!.Name : string.IsNullOrWhiteSpace(item.ProductName) ? product?.Name ?? "Product" : item.ProductName.Trim(),
                 ProductSku = string.IsNullOrWhiteSpace(item.ProductSku) ? product?.Sku : item.ProductSku.Trim(),
                 ProductImageUrl = string.IsNullOrWhiteSpace(item.ProductImageUrl) ? product?.ImageUrl : item.ProductImageUrl.Trim(),
                 ProductCategory = string.IsNullOrWhiteSpace(item.ProductCategory) ? product?.CategoryNames : item.ProductCategory.Trim(),
-                UnitPrice = item.UnitPrice,
+                UnitPrice = unitPrice,
                 Quantity = item.Quantity,
-                LineTotal = item.UnitPrice * item.Quantity
+                LineTotal = unitPrice * item.Quantity
             });
         }
 
@@ -152,6 +193,7 @@ public class OrderService(
                 Status = PaymentStatus.Pending,
                 Amount = order.Total,
                 Currency = "GEL",
+                CheckoutTokenHash = checkoutToken is null ? null : BogCheckoutSecurity.Hash(checkoutToken),
                 CreatedAt = now,
                 UpdatedAt = now
             });
@@ -171,7 +213,7 @@ public class OrderService(
             Details: $"თანხა: {order.Total:0.##} ₾; მომხმარებელი: {order.CustomerFirstName} {order.CustomerLastName}"),
             cancellationToken);
 
-        var orderDto = ToDto(order);
+        var orderDto = ToDto(order) with { PaymentAccessToken = checkoutToken };
         if (order.PaymentStatus != PaymentStatus.Pending)
         {
             try

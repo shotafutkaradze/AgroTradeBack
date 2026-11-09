@@ -23,7 +23,7 @@ public static class DependencyInjection
         services.AddScoped<IOrderEmailService, SmtpOrderEmailService>();
         services.AddScoped<IAccountEmailService, SmtpAccountEmailService>();
         services.AddHttpClient<ILibertyPayRefundClient, LibertyPayRefundClient>();
-        services.AddHttpClient<IBogInstallmentClient, BogInstallmentClient>();
+        services.AddHttpClient<IBogInstallmentClient, BogInstallmentClient>(client => client.Timeout = TimeSpan.FromSeconds(20));
         services.AddHttpClient<ITbcInstallmentClient, TbcInstallmentClient>();
         services.AddSingleton<AppTokenService>();
         services.AddSingleton<IAppTokenService>(provider => provider.GetRequiredService<AppTokenService>());

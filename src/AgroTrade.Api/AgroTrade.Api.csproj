@@ -17,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Update="wwwroot\uploads\**\*" CopyToPublishDirectory="Never" />
     <ProjectReference Include="..\AgroTrade.Application\AgroTrade.Application.csproj" />
     <ProjectReference Include="..\AgroTrade.Contracts\AgroTrade.Contracts.csproj" />
     <ProjectReference Include="..\AgroTrade.Infrastructure\AgroTrade.Infrastructure.csproj" />

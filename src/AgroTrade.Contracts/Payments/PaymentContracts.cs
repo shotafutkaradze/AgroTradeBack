@@ -13,7 +13,7 @@ public record RefundPaymentResponse(
     decimal PaymentAmount,
     string ProviderStatus);
 
-public record LibertyPayPaymentStartRequest(LibertyBrowserRequest? Browser);
+public record LibertyPayPaymentStartRequest(LibertyBrowserRequest? Browser, string? PaymentAccessToken = null);
 
 public record LibertyBrowserRequest(
     string? DeviceId,
@@ -52,7 +52,7 @@ public record LibertyPayCallbackRequest(
 
 public record LibertyPayCallbackResponse(string Xml, string ResultCode, string ResultDescription);
 
-public record BogInstallmentPaymentStartRequest(int? InstallmentMonth, string? InstallmentType);
+public record BogInstallmentPaymentStartRequest(int? InstallmentMonth, string? InstallmentType, string? PaymentAccessToken = null, string? PaymentMethod = null);
 
 public record BogInstallmentPaymentStartResponse(
     int OrderId,
@@ -80,5 +80,10 @@ public record BogInstallmentCallbackRequest(
     string? Status,
     string? OrderId,
     string? ShopOrderId,
-    string? PaymentMethod);
+    string? PaymentMethod,
+    decimal? Amount = null,
+    string? Currency = null,
+    decimal? TransferredAmount = null,
+    decimal? RefundedAmount = null,
+    string? TransactionId = null);
 

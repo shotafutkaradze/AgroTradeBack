@@ -1,5 +1,7 @@
 namespace AgroTrade.Contracts.Orders;
 
+public record OrderQuoteDto(decimal Subtotal, decimal DeliveryPrice, decimal Total);
+
 public record CreateOrderRequest(
     int? UserId,
     OrderCustomerRequest Customer,
@@ -38,7 +40,8 @@ public record OrderDto(
     decimal Total,
     DateTimeOffset CreatedAt,
     DateTimeOffset UpdatedAt,
-    List<OrderItemDto> Items);
+    List<OrderItemDto> Items,
+    string? PaymentAccessToken = null);
 
 public record OrderCustomerDto(string FirstName, string LastName, string Phone, string? Email);
 public record OrderDeliveryDto(string Method, string City, string Address, string? PickupBranch, string? Note);

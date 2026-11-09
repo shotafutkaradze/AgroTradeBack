@@ -13,7 +13,7 @@ namespace AgroTrade.Api.Controllers;
 [Route("api/[controller]")]
 public class ProductsController(
     IProductService productService,
-    IWebHostEnvironment environment) : ControllerBase
+    UploadStorage uploadStorage) : ControllerBase
 {
     [HttpGet]
     public async Task<IActionResult> Get([FromQuery] string? search, [FromQuery] bool includeHidden, CancellationToken cancellationToken)
@@ -185,34 +185,9 @@ public class ProductsController(
             .ToList();
     }
 
-    private async Task<string> SaveProductImageAsync(IFormFile image, CancellationToken cancellationToken)
+    private Task<string> SaveProductImageAsync(IFormFile image, CancellationToken cancellationToken)
     {
-        var allowedExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".webp",
-            ".gif"
-        };
-        var extension = Path.GetExtension(image.FileName);
-
-        if (image.Length == 0 || !allowedExtensions.Contains(extension))
-        {
-            throw new InvalidOperationException("Unsupported image file.");
-        }
-
-        var uploadsDirectory = Path.Combine(environment.WebRootPath ?? Path.Combine(environment.ContentRootPath, "wwwroot"), "uploads", "products");
-        Directory.CreateDirectory(uploadsDirectory);
-
-        var fileName = $"{Guid.NewGuid():N}{extension.ToLowerInvariant()}";
-        var filePath = Path.Combine(uploadsDirectory, fileName);
-
-        await using var stream = System.IO.File.Create(filePath);
-        await image.CopyToAsync(stream, cancellationToken);
-
-        var request = HttpContext.Request;
-        return $"{request.Scheme}://{request.Host}/uploads/products/{fileName}";
+        return uploadStorage.SaveImageAsync("products", image, HttpContext.Request, cancellationToken);
     }
 }
 

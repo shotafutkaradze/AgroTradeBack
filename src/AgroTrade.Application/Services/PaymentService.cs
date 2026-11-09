@@ -12,6 +12,8 @@ namespace AgroTrade.Application.Services;
 
 public interface IPaymentService
 {
+    Task<PaymentStatusDto?> GetLibertyStatusAsync(int orderId, string? accessToken, CancellationToken cancellationToken);
+    Task<PaymentStatusDto?> GetBogStatusAsync(int orderId, string? accessToken, CancellationToken cancellationToken);
     Task<LibertyPayPaymentStartResponse?> StartLibertyPaymentAsync(
         int orderId,
         LibertyPayPaymentStartRequest request,
@@ -76,6 +78,20 @@ public class PaymentService(
             throw new InvalidOperationException("Order payment method is not Liberty Pay.");
         }
 
+        EnsureLibertyPayConfigured();
+        if (order.Total <= 0) throw new InvalidOperationException("Payment amount must be positive.");
+        if (order.PaymentStatus is PaymentStatus.Paid or PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded || order.Status == OrderStatus.Cancelled)
+            throw new InvalidOperationException("Order cannot start a Liberty payment.");
+        var existing = await dbContext.Payments.FirstOrDefaultAsync(payment => payment.OrderId == order.Id &&
+            payment.Provider == PaymentProvider.LibertyPay, cancellationToken);
+        if (existing is null || !BogCheckoutSecurity.Verify(request.PaymentAccessToken, existing.CheckoutTokenHash))
+            throw new UnauthorizedAccessException();
+        if (existing.Status is PaymentStatus.Paid or PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded or PaymentStatus.Failed or PaymentStatus.Cancelled)
+            throw new InvalidOperationException("Order cannot restart this Liberty payment.");
+        if (!string.IsNullOrWhiteSpace(existing.ProviderOrderId))
+            return new LibertyPayPaymentStartResponse(order.Id, order.OrderNumber, existing.ProviderOrderId,
+                existing.ProviderStatus ?? "CREATED", null, BuildLibertyPayUrl(order));
+
         var now = DateTimeOffset.UtcNow;
         var orderCode = order.OrderNumber;
         order.LibertyPaymentOrderCode = orderCode;
@@ -87,8 +103,7 @@ public class PaymentService(
             .OrderByDescending(payment => payment.CreatedAt)
             .FirstOrDefaultAsync(payment =>
                 payment.OrderId == order.Id &&
-                payment.Provider == PaymentProvider.LibertyPay &&
-                payment.ProviderOrderId == null,
+                payment.Provider == PaymentProvider.LibertyPay,
                 cancellationToken);
 
         if (payment is null)
@@ -103,6 +118,8 @@ public class PaymentService(
             dbContext.Payments.Add(payment);
         }
 
+        if (payment.Status is PaymentStatus.Failed or PaymentStatus.Cancelled)
+            throw new InvalidOperationException("Create a new checkout for a failed Liberty payment.");
         payment.Status = PaymentStatus.Pending;
         payment.Amount = order.Total;
         payment.Currency = libertyPayOptions.Currency;
@@ -110,6 +127,7 @@ public class PaymentService(
         payment.ProviderOrderPassword = null;
         payment.ProviderStatus = "CREATED";
         payment.UpdatedAt = now;
+        payment.Version++;
 
         await dbContext.SaveChangesAsync(cancellationToken);
         await activityLogService.AddAsync(new ActivityLogEntry(
@@ -148,81 +166,72 @@ public class PaymentService(
     }
 
     public async Task<BogInstallmentPaymentStartResponse?> StartBogInstallmentAsync(
-        int orderId,
-        BogInstallmentPaymentStartRequest request,
-        CancellationToken cancellationToken)
+        int orderId, BogInstallmentPaymentStartRequest request, CancellationToken cancellationToken)
     {
-        var order = await dbContext.Orders
-            .Include(order => order.Items)
+        var order = await dbContext.Orders.Include(order => order.Items).Include(order => order.Payments)
             .FirstOrDefaultAsync(order => order.Id == orderId, cancellationToken);
-        if (order is null)
+        if (order is null) return null;
+        var payment = order.Payments.SingleOrDefault(payment => payment.Provider == PaymentProvider.BogInstallment);
+        if (payment is null || !BogCheckoutSecurity.Verify(request.PaymentAccessToken, payment.CheckoutTokenHash))
+            throw new UnauthorizedAccessException();
+        if (order.PaymentMethod is not PaymentMethod.BogInstallmentPlan and not PaymentMethod.BogPieceByPiece ||
+            order.Status == OrderStatus.Cancelled || order.PaymentStatus is PaymentStatus.Paid or PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded)
+            throw new InvalidOperationException("Order cannot start a BOG payment.");
+        if (request.InstallmentMonth is null or <= 0 || string.IsNullOrWhiteSpace(request.InstallmentType) || request.InstallmentType.Length > 100)
+            throw new ArgumentException("Select month and discount_code in the BOG calculator.");
+        var month = request.InstallmentMonth.Value;
+        var type = request.InstallmentType.Trim();
+        var selectedMethod = request.PaymentMethod switch
         {
-            return null;
-        }
+            null => order.PaymentMethod,
+            "bog-installment" or "bog_installment_plan" => PaymentMethod.BogInstallmentPlan,
+            "bog-parts" or "bog_piece_by_piece" => PaymentMethod.BogPieceByPiece,
+            _ => throw new ArgumentException("Unsupported BOG payment method.")
+        };
+        if (payment.CheckoutIdempotencyKey.HasValue && (payment.InstallmentMonth != month || payment.InstallmentType != type || payment.Method != selectedMethod))
+            throw new InvalidOperationException("Payment has already started with different loan conditions.");
+        if (!string.IsNullOrWhiteSpace(payment.ProviderOrderId))
+            return new BogInstallmentPaymentStartResponse(order.Id, order.OrderNumber, payment.ProviderOrderId,
+                payment.ProviderStatus ?? "created", payment.RedirectUrl ?? string.Empty);
 
-        if (order.PaymentMethod is not PaymentMethod.BogInstallmentPlan and not PaymentMethod.BogPieceByPiece)
+        if (!payment.CheckoutIdempotencyKey.HasValue)
         {
-            throw new InvalidOperationException("Order payment method is not BOG.");
+            order.PaymentMethod = selectedMethod;
+            payment.Method = selectedMethod;
+            payment.CheckoutIdempotencyKey = Guid.NewGuid();
+            payment.InstallmentMonth = month;
+            payment.InstallmentType = type;
+            payment.Version++;
+            payment.UpdatedAt = DateTimeOffset.UtcNow;
+            // Persist before the network request so retries use the same BOG Idempotency-Key.
+            await dbContext.SaveChangesAsync(cancellationToken);
         }
-
-        var isPieceByPiece = order.PaymentMethod == PaymentMethod.BogPieceByPiece;
-        var month = request.InstallmentMonth.GetValueOrDefault(isPieceByPiece ? 4 : bogInstallmentOptions.DefaultInstallmentMonth);
-        var type = isPieceByPiece
-            ? "ZERO"
-            : string.IsNullOrWhiteSpace(request.InstallmentType)
-            ? bogInstallmentOptions.DefaultInstallmentType
-            : request.InstallmentType.Trim();
-
-        var bogOrder = await bogInstallmentClient.CreateOrderAsync(order, month, type, cancellationToken);
-        var now = DateTimeOffset.UtcNow;
-        order.PaymentStatus = PaymentStatus.Pending;
-        order.UpdatedAt = now;
-
-        var payment = await dbContext.Payments
-            .OrderByDescending(payment => payment.CreatedAt)
-            .FirstOrDefaultAsync(payment =>
-                payment.OrderId == order.Id &&
-                payment.Provider == PaymentProvider.BogInstallment,
-                cancellationToken);
-
-        if (payment is null)
-        {
-            payment = new Payment
-            {
-                OrderId = order.Id,
-                Provider = PaymentProvider.BogInstallment,
-                Method = order.PaymentMethod,
-                CreatedAt = now
-            };
-            dbContext.Payments.Add(payment);
-        }
-
-        payment.Status = PaymentStatus.Pending;
-        payment.Amount = order.Total;
+        var bankOrder = await bogInstallmentClient.CreateOrderAsync(order, month, type, cancellationToken, payment.CheckoutIdempotencyKey);
+        payment.ProviderOrderId = bankOrder.OrderId;
+        payment.ProviderStatus = bankOrder.Status;
+        payment.RedirectUrl = bankOrder.RedirectUrl;
         payment.Currency = bogInstallmentOptions.Currency;
-        payment.ProviderOrderId = bogOrder.OrderId;
-        payment.ProviderStatus = bogOrder.Status;
-        payment.UpdatedAt = now;
-
+        payment.Amount = order.Total;
+        payment.Status = PaymentStatus.Pending;
+        payment.Version++;
+        payment.UpdatedAt = DateTimeOffset.UtcNow;
         await dbContext.SaveChangesAsync(cancellationToken);
-        await activityLogService.AddAsync(new ActivityLogEntry(
-            "info",
-            "payment",
-            isPieceByPiece ? "bog_bnpl_started" : "bog_installment_started",
-            $"{(isPieceByPiece ? "BOG ნაწილ-ნაწილ" : "BOG განვადება")} დაიწყო შეკვეთაზე {order.OrderNumber}",
-            order.Id,
-            order.OrderNumber,
-            "BOG",
-            payment.Status.ToValue(),
-            Details: $"BOG order: {bogOrder.OrderId}; თანხა: {order.Total:0.##} ₾"),
-            cancellationToken);
+        logger.LogInformation("BOG checkout created for local order {OrderId} with method {Method}", order.Id, payment.Method);
+        return new BogInstallmentPaymentStartResponse(order.Id, order.OrderNumber, bankOrder.OrderId, bankOrder.Status, bankOrder.RedirectUrl);
+    }
 
-        return new BogInstallmentPaymentStartResponse(
-            order.Id,
-            order.OrderNumber,
-            bogOrder.OrderId,
-            bogOrder.Status,
-            bogOrder.RedirectUrl);
+    public async Task<PaymentStatusDto?> GetBogStatusAsync(int orderId, string? accessToken, CancellationToken cancellationToken)
+    {
+        var order = await dbContext.Orders.Include(order => order.Payments)
+            .FirstOrDefaultAsync(order => order.Id == orderId, cancellationToken);
+        if (order is null) return null;
+        var payment = order.Payments.SingleOrDefault(payment => payment.Provider == PaymentProvider.BogInstallment);
+        if (payment is null || !BogCheckoutSecurity.Verify(accessToken, payment.CheckoutTokenHash))
+            throw new UnauthorizedAccessException();
+        if (string.IsNullOrWhiteSpace(payment.ProviderOrderId))
+            return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
+        return await HandleBogInstallmentCallbackAsync(new BogInstallmentCallbackRequest(null,
+            payment.ProviderOrderId, order.OrderNumber, null), cancellationToken);
     }
 
     public async Task<TbcInstallmentPaymentStartResponse?> StartTbcInstallmentAsync(
@@ -353,6 +362,10 @@ public class PaymentService(
             return BuildCallbackResponse("-2", "Order not found", request.TransactionCode);
         }
 
+        if (order.PaymentMethod != PaymentMethod.Liberty ||
+            !string.Equals(request.Currency, libertyPayOptions.Currency.Trim(), StringComparison.OrdinalIgnoreCase) ||
+            (request.TestMode == "1") != (libertyPayOptions.TestMode.Trim() == "1"))
+            return BuildCallbackResponse("-3", "Order data mismatch", request.TransactionCode);
         var expectedAmount = ToTetri(order.Total);
         if (!string.Equals(request.Amount, expectedAmount, StringComparison.Ordinal))
         {
@@ -375,30 +388,24 @@ public class PaymentService(
             .OrderByDescending(payment => payment.CreatedAt)
             .FirstOrDefault();
 
-        if (payment is not null && payment.Status == PaymentStatus.Paid)
+        if (payment is not null && payment.Status is PaymentStatus.Paid or PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded)
         {
             return BuildCallbackResponse("1", "Duplicate transaction", request.TransactionCode);
         }
 
         var now = DateTimeOffset.UtcNow;
-        var isCompleted = string.Equals(request.Status, "COMPLETED", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(request.Status, "COMPLETE", StringComparison.OrdinalIgnoreCase);
+        var isCompleted = string.Equals(request.Status, "COMPLETED", StringComparison.OrdinalIgnoreCase);
         var isCheck = string.Equals(request.Status, "CHECK", StringComparison.OrdinalIgnoreCase);
 
-        if (payment is null)
-        {
-            payment = new Payment
-            {
-                OrderId = order.Id,
-                Provider = PaymentProvider.LibertyPay,
-                Method = PaymentMethod.Liberty,
-                Amount = order.Total,
-                Currency = libertyPayOptions.Currency,
-                ProviderOrderId = order.OrderNumber,
-                CreatedAt = now
-            };
-            dbContext.Payments.Add(payment);
-        }
+        if (payment is null || payment.ProviderOrderId != request.OrderCode)
+            return BuildCallbackResponse("-3", "Payment not started", request.TransactionCode);
+        if (payment.Amount != order.Total || !string.Equals(payment.Currency, request.Currency, StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrEmpty(request.CustomData) && request.CustomData != order.Id.ToString()))
+            return BuildCallbackResponse("-3", "Payment data mismatch", request.TransactionCode);
+        if (isCompleted && string.IsNullOrWhiteSpace(request.TransactionCode))
+            return BuildCallbackResponse("-3", "Missing transactioncode", request.TransactionCode);
+        if (!isCompleted && !isCheck && request.Status is not "ERROR" and not "CANCELED")
+            return BuildCallbackResponse("-3", "Unsupported status", request.TransactionCode);
 
         payment.ProviderStatus = request.Status;
         payment.ProviderTransactionCode = string.IsNullOrWhiteSpace(request.TransactionCode)
@@ -409,7 +416,7 @@ public class PaymentService(
         if (isCompleted)
         {
             order.PaymentStatus = PaymentStatus.Paid;
-            order.Status = OrderStatus.Processing;
+            if (order.Status == OrderStatus.New) order.Status = OrderStatus.Processing;
             order.PaymentTransactionCode = request.TransactionCode;
             order.UpdatedAt = now;
             payment.Status = PaymentStatus.Paid;
@@ -425,10 +432,12 @@ public class PaymentService(
         {
             order.PaymentStatus = PaymentStatus.Failed;
             order.UpdatedAt = now;
-            payment.Status = PaymentStatus.Failed;
+            payment.Status = request.Status == "CANCELED" ? PaymentStatus.Cancelled : PaymentStatus.Failed;
+            order.PaymentStatus = payment.Status;
             payment.CompletedAt = now;
         }
 
+        payment.Version++;
         await dbContext.SaveChangesAsync(cancellationToken);
         await activityLogService.AddAsync(new ActivityLogEntry(
             isCompleted ? "success" : isCheck ? "info" : "error",
@@ -484,6 +493,8 @@ public class PaymentService(
             payment.ProviderTransactionCode = order.PaymentTransactionCode;
         }
 
+        if (payment.Status is not PaymentStatus.Paid and not PaymentStatus.PartiallyRefunded)
+            throw new InvalidOperationException("Only confirmed payments can be refunded.");
         var refundAmount = request.Amount ?? payment.Amount - payment.RefundedAmount;
         if (refundAmount <= 0)
         {
@@ -495,7 +506,14 @@ public class PaymentService(
             throw new InvalidOperationException("Refund amount cannot exceed payment amount.");
         }
 
-        var refundCode = $"RF-{order.OrderNumber}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+        if (payment.ProviderRefundStatus == "REQUESTED")
+            throw new InvalidOperationException("A refund is already pending. Verify its bank result before retrying.");
+        payment.ProviderRefundStatus = "REQUESTED";
+        payment.Version++;
+        payment.UpdatedAt = DateTimeOffset.UtcNow;
+        await dbContext.SaveChangesAsync(cancellationToken);
+
+        var refundCode = $"RF-{Guid.NewGuid():N}";
         var refundDescription = TrimToLength(
             string.IsNullOrWhiteSpace(request.Reason) ? $"Refund for {order.OrderNumber}" : request.Reason.Trim(),
             100);
@@ -537,6 +555,9 @@ public class PaymentService(
 
         if (!refundResult.IsSuccess)
         {
+            payment.ProviderRefundStatus = refundResult.StatusCode;
+            payment.Version++;
+            await dbContext.SaveChangesAsync(cancellationToken);
             var detail = string.IsNullOrWhiteSpace(refundResult.RawResponse)
                 ? string.Empty
                 : $" Response: {TrimToLength(refundResult.RawResponse.ReplaceLineEndings(" "), 500)}";
@@ -563,6 +584,7 @@ public class PaymentService(
 
         var now = DateTimeOffset.UtcNow;
         payment.RefundedAmount += refundAmount;
+        payment.Version++;
         payment.RefundReason = string.IsNullOrWhiteSpace(request.Reason) ? payment.RefundReason : request.Reason.Trim();
         payment.ProviderRefundStatus = refundResult.StatusCode;
         payment.ProviderTransactionCode = string.IsNullOrWhiteSpace(refundResult.TransactionCode)
@@ -618,190 +640,84 @@ public class PaymentService(
 
 
 
-    private async Task<PaymentStatusDto?> UpdateReturnStatusAsync(
-        string? paymentOrderCode,
-        PaymentStatus paymentStatus,
-        OrderStatus? orderStatus,
-        string? transactionCode,
-        CancellationToken cancellationToken)
+    // Browser return URLs are informational. Only a validated callback may change payment state.
+    private async Task<PaymentStatusDto?> UpdateReturnStatusAsync(string? paymentOrderCode,
+        PaymentStatus paymentStatus, OrderStatus? orderStatus, string? transactionCode, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(paymentOrderCode))
-        {
-            await activityLogService.AddAsync(new ActivityLogEntry(
-                "error",
-                "payment",
-                "liberty_return_missing_order",
-                "Liberty დაბრუნდა შეკვეთის კოდის გარეშე",
-                Provider: "Liberty",
-                Status: paymentStatus.ToValue(),
-                Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
-                cancellationToken);
-            return null;
-        }
+        if (string.IsNullOrWhiteSpace(paymentOrderCode)) return null;
+        var order = await dbContext.Orders.AsNoTracking().FirstOrDefaultAsync(order =>
+            order.PaymentMethod == PaymentMethod.Liberty && order.LibertyPaymentOrderCode == paymentOrderCode, cancellationToken);
+        return order is null ? null : new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
+    }
 
-        var order = await dbContext.Orders
-            .Include(order => order.Items)
-            .FirstOrDefaultAsync(order => order.LibertyPaymentOrderCode == paymentOrderCode, cancellationToken);
-
-        if (order is null)
-        {
-            await activityLogService.AddAsync(new ActivityLogEntry(
-                "error",
-                "payment",
-                "liberty_return_order_not_found",
-                $"Liberty დაბრუნდა, მაგრამ შეკვეთა ვერ მოიძებნა: {paymentOrderCode}",
-                OrderNumber: paymentOrderCode,
-                Provider: "Liberty",
-                Status: paymentStatus.ToValue(),
-                Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
-                cancellationToken);
-            return null;
-        }
-
-        order.PaymentStatus = paymentStatus;
-        if (paymentStatus == PaymentStatus.Paid && !string.IsNullOrWhiteSpace(transactionCode))
-        {
-            order.PaymentTransactionCode = transactionCode.Trim();
-        }
-        if (orderStatus is not null)
-        {
-            order.Status = orderStatus.Value;
-        }
-        order.UpdatedAt = DateTimeOffset.UtcNow;
-
-        var payment = await dbContext.Payments
-            .OrderByDescending(payment => payment.CreatedAt)
-            .FirstOrDefaultAsync(payment => payment.ProviderOrderId == paymentOrderCode, cancellationToken);
-
-        if (payment is not null)
-        {
-            payment.Status = paymentStatus;
-            if (paymentStatus == PaymentStatus.Paid && !string.IsNullOrWhiteSpace(transactionCode))
-            {
-                payment.ProviderTransactionCode = transactionCode.Trim();
-            }
-            payment.UpdatedAt = order.UpdatedAt;
-            payment.CompletedAt = paymentStatus is PaymentStatus.Paid or PaymentStatus.Failed or PaymentStatus.Cancelled
-                ? order.UpdatedAt
-                : null;
-        }
-
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await activityLogService.AddAsync(new ActivityLogEntry(
-            paymentStatus == PaymentStatus.Paid ? "success" : "warning",
-            "payment",
-            paymentStatus == PaymentStatus.Paid
-                ? "liberty_return_paid"
-                : paymentStatus == PaymentStatus.Cancelled
-                    ? "liberty_return_cancelled"
-                    : "liberty_return_failed",
-            paymentStatus == PaymentStatus.Paid
-                ? $"Liberty დაბრუნება წარმატებულია: {order.OrderNumber}"
-                : paymentStatus == PaymentStatus.Cancelled
-                    ? $"Liberty გადახდა გაუქმდა მომხმარებლისგან: {order.OrderNumber}"
-                    : $"Liberty გადახდა დაბრუნდა შეცდომით: {order.OrderNumber}",
-            order.Id,
-            order.OrderNumber,
-            "Liberty",
-            paymentStatus.ToValue(),
-            Details: string.IsNullOrWhiteSpace(transactionCode) ? null : $"transactioncode={transactionCode.Trim()}"),
-            cancellationToken);
-
-        if (paymentStatus == PaymentStatus.Paid)
-        {
-            await SendPaidOrderEmailAsync(order, cancellationToken);
-        }
-
+    public async Task<PaymentStatusDto?> GetLibertyStatusAsync(int orderId, string? accessToken, CancellationToken cancellationToken)
+    {
+        var order = await dbContext.Orders.AsNoTracking().Include(order => order.Payments)
+            .FirstOrDefaultAsync(order => order.Id == orderId && order.PaymentMethod == PaymentMethod.Liberty, cancellationToken);
+        if (order is null) return null;
+        var payment = order.Payments.FirstOrDefault(payment => payment.Provider == PaymentProvider.LibertyPay);
+        if (payment is null || !BogCheckoutSecurity.Verify(accessToken, payment.CheckoutTokenHash)) throw new UnauthorizedAccessException();
         return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
     }
 
     public async Task<PaymentStatusDto?> HandleBogInstallmentCallbackAsync(
-        BogInstallmentCallbackRequest request,
-        CancellationToken cancellationToken)
+        BogInstallmentCallbackRequest request, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(request.ShopOrderId))
-        {
-            return null;
-        }
-
-        var order = await dbContext.Orders
-            .Include(order => order.Payments)
-            .Include(order => order.Items)
+        if (string.IsNullOrWhiteSpace(request.OrderId) || string.IsNullOrWhiteSpace(request.ShopOrderId)) return null;
+        var order = await dbContext.Orders.Include(order => order.Payments).Include(order => order.Items)
             .FirstOrDefaultAsync(order => order.OrderNumber == request.ShopOrderId, cancellationToken);
-
-        if (order is null)
+        if (order is null) return null;
+        var payment = order.Payments.SingleOrDefault(payment => payment.Provider == PaymentProvider.BogInstallment &&
+            payment.ProviderOrderId == request.OrderId);
+        if (payment is null) return null;
+        // The callback only triggers reconciliation. Bank receipt is the authoritative state.
+        var details = await bogInstallmentClient.GetPaymentDetailsAsync(request.OrderId, cancellationToken);
+        if (details.OrderId != payment.ProviderOrderId || details.ShopOrderId != order.OrderNumber ||
+            details.Amount != payment.Amount || !string.Equals(details.Currency, payment.Currency, StringComparison.OrdinalIgnoreCase) ||
+            ((!string.IsNullOrWhiteSpace(details.PaymentMethod) || details.Status == "completed") &&
+             details.PaymentMethod != (payment.Method == PaymentMethod.BogPieceByPiece ? "bnpl" : "bog_loan")) ||
+            (details.Status == "completed" && details.TransferredAmount != payment.Amount) ||
+            details.RefundedAmount < 0 || details.RefundedAmount > payment.Amount ||
+            (details.Status is "refunded" or "refunded_partially" && details.RefundedAmount is null) ||
+            (details.Status == "refunded" && details.RefundedAmount != payment.Amount))
         {
-            return null;
+            logger.LogWarning("BOG receipt mismatch for local order {OrderId}", order.Id);
+            throw new InvalidOperationException("BOG payment details do not match the stored order.");
         }
-
-        var status = request.Status?.Trim().ToLowerInvariant();
-        var paymentStatus = status switch
+        var nextStatus = details.Status switch
         {
-            "success" => PaymentStatus.Paid,
-            "reverse_success" => PaymentStatus.Cancelled,
-            _ => PaymentStatus.Failed
+            "completed" => PaymentStatus.Paid,
+            "rejected" => PaymentStatus.Failed,
+            "refunded" => PaymentStatus.Refunded,
+            "refunded_partially" => PaymentStatus.PartiallyRefunded,
+            _ => PaymentStatus.Pending
         };
-        var orderStatus = status switch
-        {
-            "success" => OrderStatus.Processing,
-            "reverse_success" => OrderStatus.Cancelled,
-            "error" => OrderStatus.Cancelled,
-            _ => order.Status
-        };
+        var wasPaid = payment.Status is PaymentStatus.Paid or PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded;
+        var mayApply = !(wasPaid && nextStatus is PaymentStatus.Pending or PaymentStatus.Failed) &&
+            !(payment.Status == PaymentStatus.Refunded && nextStatus != PaymentStatus.Refunded) &&
+            !(payment.Status == PaymentStatus.PartiallyRefunded && nextStatus == PaymentStatus.Paid);
+        if (!mayApply || (payment.ProviderStatus == details.Status && payment.Status == nextStatus &&
+            payment.RefundedAmount == details.RefundedAmount.GetValueOrDefault()))
+            return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
         var now = DateTimeOffset.UtcNow;
-
-        order.PaymentStatus = paymentStatus;
-        order.Status = orderStatus;
-        order.UpdatedAt = now;
-
-        var payment = order.Payments
-            .Where(payment => payment.Provider == PaymentProvider.BogInstallment)
-            .OrderByDescending(payment => payment.CreatedAt)
-            .FirstOrDefault();
-
-        if (payment is null)
-        {
-            payment = new Payment
-            {
-                OrderId = order.Id,
-                Provider = PaymentProvider.BogInstallment,
-                Method = PaymentMethod.BogInstallmentPlan,
-                Amount = order.Total,
-                Currency = bogInstallmentOptions.Currency,
-                CreatedAt = now
-            };
-            dbContext.Payments.Add(payment);
-        }
-
-        payment.Status = paymentStatus;
-        payment.ProviderOrderId = string.IsNullOrWhiteSpace(request.OrderId) ? payment.ProviderOrderId : request.OrderId;
-        payment.ProviderStatus = request.Status;
-        payment.ProviderTransactionCode = request.OrderId;
-        payment.CompletedAt = paymentStatus is PaymentStatus.Paid or PaymentStatus.Failed or PaymentStatus.Cancelled
-            ? now
-            : null;
+        payment.Status = nextStatus;
+        payment.ProviderStatus = details.Status;
+        payment.ProviderTransactionCode = details.TransactionId;
         payment.UpdatedAt = now;
-
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await activityLogService.AddAsync(new ActivityLogEntry(
-            paymentStatus == PaymentStatus.Paid ? "success" : "warning",
-            "payment",
-            paymentStatus == PaymentStatus.Paid ? "bog_installment_paid" : "bog_installment_failed",
-            paymentStatus == PaymentStatus.Paid
-                ? $"BOG განვადება წარმატებულია: {order.OrderNumber}"
-                : $"BOG განვადება ვერ დასრულდა: {order.OrderNumber}",
-            order.Id,
-            order.OrderNumber,
-            "BOG",
-            paymentStatus.ToValue(),
-            Details: $"bankStatus={request.Status}; bogOrder={request.OrderId}"),
-            cancellationToken);
-
-        if (paymentStatus == PaymentStatus.Paid)
+        payment.Version++;
+        if (nextStatus != PaymentStatus.Pending) payment.CompletedAt ??= now;
+        if (nextStatus is PaymentStatus.Refunded or PaymentStatus.PartiallyRefunded)
         {
-            await SendPaidOrderEmailAsync(order, cancellationToken);
+            payment.RefundedAmount = details.RefundedAmount.GetValueOrDefault();
+            payment.RefundedAt = now;
         }
-
+        order.PaymentStatus = nextStatus;
+        if (nextStatus == PaymentStatus.Paid && order.Status == OrderStatus.New) order.Status = OrderStatus.Processing;
+        order.UpdatedAt = now;
+        // EF's transaction rolls back both updates if another callback wins the version check.
+        await dbContext.SaveChangesAsync(cancellationToken);
+        logger.LogInformation("BOG local order {OrderId} reconciled to {Status}", order.Id, details.Status);
+        if (nextStatus == PaymentStatus.Paid && !wasPaid) await SendPaidOrderEmailAsync(order, cancellationToken);
         return new PaymentStatusDto(order.Id, order.OrderNumber, order.Status.ToValue(), order.PaymentStatus.ToValue());
     }
 
@@ -1023,7 +939,9 @@ public class PaymentService(
 
     private bool IsCallbackCheckValid(LibertyPayCallbackRequest request)
     {
-        if (string.IsNullOrWhiteSpace(request.Check))
+        if (string.IsNullOrWhiteSpace(libertyPayOptions.Key) || request.Check?.Length != 64 ||
+            string.IsNullOrWhiteSpace(request.Status) || string.IsNullOrWhiteSpace(request.Amount) ||
+            string.IsNullOrWhiteSpace(request.Currency) || string.IsNullOrWhiteSpace(request.PayMethod))
         {
             return false;
         }
@@ -1042,14 +960,15 @@ public class PaymentService(
             payedAmount +
             (request.CustomData ?? string.Empty) +
             (request.TestMode ?? string.Empty) +
-            libertyPayOptions.Key);
+            libertyPayOptions.Key.Trim());
 
-        return string.Equals(expectedCheck, request.Check, StringComparison.OrdinalIgnoreCase);
+        return CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expectedCheck),
+            Encoding.ASCII.GetBytes(request.Check!.ToLowerInvariant()));
     }
 
     private LibertyPayCallbackResponse BuildCallbackResponse(string resultCode, string resultDescription, string? transactionCode)
     {
-        var check = Sha256(resultCode + resultDescription + (transactionCode ?? string.Empty) + libertyPayOptions.Key);
+        var check = Sha256(resultCode + resultDescription + (transactionCode ?? string.Empty) + libertyPayOptions.Key.Trim());
         var xml = $"""
             <result>
               <resultcode>{System.Security.SecurityElement.Escape(resultCode)}</resultcode>
@@ -1074,7 +993,7 @@ public class PaymentService(
 
     private static string ToTetri(decimal amount)
     {
-        return decimal.Round(amount * 100, 0, MidpointRounding.AwayFromZero).ToString("0");
+        return decimal.Round(amount * 100, 0, MidpointRounding.AwayFromZero).ToString("0", System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static string TrimToLength(string value, int maxLength)
@@ -1091,7 +1010,9 @@ public class PaymentService(
         string? responseBody,
         string? note = null)
     {
-        var normalizedRequest = requestBody.ReplaceLineEndings(" ").Trim();
+        var normalizedRequest = System.Text.RegularExpressions.Regex.Replace(requestBody,
+            @"(<(?:\w+:)?signature\b[^>]*>)[\s\S]*?(</(?:\w+:)?signature>)", "$1[REDACTED]$2",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase).ReplaceLineEndings(" ").Trim();
         var normalizedResponse = string.IsNullOrWhiteSpace(responseBody)
             ? null
             : responseBody.ReplaceLineEndings(" ").Trim();

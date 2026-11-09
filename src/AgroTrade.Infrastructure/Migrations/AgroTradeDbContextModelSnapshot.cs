@@ -132,6 +132,17 @@ namespace AgroTrade.Infrastructure.Migrations
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("City").HasMaxLength(120).HasColumnType("character varying(120)");
+                    b.Property<string>("Region").HasMaxLength(160).HasColumnType("character varying(160)");
+                    b.Property<string>("Street").HasMaxLength(180).HasColumnType("character varying(180)");
+                    b.Property<string>("Building").HasMaxLength(120).HasColumnType("character varying(120)");
+                    b.Property<string>("AddressNote").HasMaxLength(300).HasColumnType("character varying(300)");
+                    b.Property<string>("EmailVerificationToken").HasMaxLength(120).HasColumnType("character varying(120)");
+                    b.Property<bool>("IsEmailVerified").HasColumnType("boolean");
+                    b.Property<DateTimeOffset?>("EmailVerificationTokenExpiresAt").HasColumnType("timestamp with time zone");
+                    b.Property<DateTimeOffset?>("EmailVerifiedAt").HasColumnType("timestamp with time zone");
+                    b.HasIndex("EmailVerificationToken");
+
                     b.HasKey("Id");
 
                     b.HasIndex("Email")
@@ -204,6 +215,8 @@ namespace AgroTrade.Infrastructure.Migrations
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ImageUrl").HasMaxLength(1000).HasColumnType("character varying(1000)");
 
                     b.HasKey("Id");
 
@@ -456,6 +469,13 @@ namespace AgroTrade.Infrastructure.Migrations
 
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CheckoutIdempotencyKey").HasColumnType("uuid");
+                    b.Property<string>("CheckoutTokenHash").HasMaxLength(64).HasColumnType("character varying(64)");
+                    b.Property<int?>("InstallmentMonth").HasColumnType("integer");
+                    b.Property<string>("InstallmentType").HasMaxLength(100).HasColumnType("character varying(100)");
+                    b.Property<string>("RedirectUrl").HasMaxLength(2000).HasColumnType("character varying(2000)");
+                    b.Property<long>("Version").IsConcurrencyToken().HasColumnType("bigint");
 
                     b.HasKey("Id");
 

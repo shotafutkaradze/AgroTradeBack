@@ -112,6 +112,10 @@ public class AgroTradeDbContext(DbContextOptions<AgroTradeDbContext> options) : 
             entity.Property(payment => payment.Status)
                 .HasConversion(value => value.ToValue(), value => value.ToPaymentStatus())
                 .HasMaxLength(50);
+            entity.Property(payment => payment.CheckoutTokenHash).HasMaxLength(64);
+            entity.Property(payment => payment.InstallmentType).HasMaxLength(100);
+            entity.Property(payment => payment.RedirectUrl).HasMaxLength(2000);
+            entity.Property(payment => payment.Version).IsConcurrencyToken();
             entity.Property(payment => payment.Amount).HasPrecision(18, 2);
             entity.Property(payment => payment.Currency).HasMaxLength(3);
             entity.Property(payment => payment.ProviderOrderId).HasMaxLength(100);
