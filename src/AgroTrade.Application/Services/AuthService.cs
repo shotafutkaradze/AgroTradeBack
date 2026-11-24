@@ -2,6 +2,9 @@ using AgroTrade.Application.Abstractions;
 using AgroTrade.Contracts.Auth;
 using AgroTrade.Domain.Enums;
 using AgroTrade.Domain.Models;
+using System.Security.Cryptography;
+using System.Text.Json;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -13,6 +16,8 @@ public interface IAuthService
 {
     Task<AuthResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken);
     Task<AuthResponse?> LoginAsync(LoginRequest request, CancellationToken cancellationToken);
+    Task SendPasswordResetAsync(ForgotPasswordRequest request, CancellationToken cancellationToken);
+    Task<bool> ResetPasswordAsync(ResetPasswordRequest request, CancellationToken cancellationToken);
     Task<bool> VerifyEmailAsync(VerifyEmailRequest request, CancellationToken cancellationToken);
     Task<bool> ResendEmailVerificationAsync(ResendEmailVerificationRequest request, CancellationToken cancellationToken);
     Task<IReadOnlyList<AuthUserDto>> GetUsersAsync(CancellationToken cancellationToken);
@@ -28,9 +33,15 @@ public class AuthService(
     IAppTokenService tokenService,
     IAccountEmailService accountEmailService,
     IConfiguration configuration,
+    IDataProtectionProvider protectionProvider,
     ILogger<AuthService> logger) : IAuthService
 {
     private readonly PasswordHasher<AppUser> passwordHasher = new();
+    private readonly ITimeLimitedDataProtector resetProtector = protectionProvider
+        .CreateProtector("AgroTrade.PasswordReset.v1")
+        .ToTimeLimitedDataProtector();
+
+    private sealed record PasswordResetToken(int UserId, string Email, string PasswordHash);
 
     public async Task<AuthResponse> RegisterAsync(RegisterRequest request, CancellationToken cancellationToken)
     {
@@ -87,6 +98,65 @@ public class AuthService(
 
         var result = passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
         return result == PasswordVerificationResult.Failed ? null : ToResponse(user);
+    }
+
+    public async Task SendPasswordResetAsync(ForgotPasswordRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Email)) return;
+
+        var email = request.Email.Trim().ToLowerInvariant();
+        var user = await dbContext.AppUsers.AsNoTracking().FirstOrDefaultAsync(
+            item => item.Email == email && item.IsEmailVerified && !item.IsBlocked,
+            cancellationToken);
+        if (user is null) return;
+
+        var payload = JsonSerializer.Serialize(new PasswordResetToken(user.Id, user.Email, user.PasswordHash));
+        var token = resetProtector.Protect(payload, TimeSpan.FromMinutes(30));
+        var url = BuildAccountLink("resetPassword", token, configuration["Auth:PasswordResetUrl"]);
+
+        try
+        {
+            await accountEmailService.SendPasswordResetAsync(ToDto(user), url, cancellationToken);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            logger.LogError(exception, "Failed to send password reset link for user {UserId}", user.Id);
+        }
+    }
+
+    public async Task<bool> ResetPasswordAsync(ResetPasswordRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.Token) || request.Token.Length > 4096 ||
+            string.IsNullOrWhiteSpace(request.Password) || request.Password.Length is < 6 or > 128)
+        {
+            return false;
+        }
+
+        PasswordResetToken? token;
+        try
+        {
+            token = JsonSerializer.Deserialize<PasswordResetToken>(resetProtector.Unprotect(request.Token));
+        }
+        catch (Exception exception) when (exception is CryptographicException or FormatException or JsonException)
+        {
+            return false;
+        }
+
+        if (token is null) return false;
+
+        var eligibleUser = dbContext.AppUsers.Where(user => user.Id == token.UserId &&
+            user.Email == token.Email && user.PasswordHash == token.PasswordHash &&
+            user.IsEmailVerified && !user.IsBlocked);
+        var user = await eligibleUser.AsNoTracking().FirstOrDefaultAsync(cancellationToken);
+        if (user is null) return false;
+
+        var hash = passwordHasher.HashPassword(user, request.Password);
+        var now = DateTimeOffset.UtcNow;
+        var changed = await eligibleUser.ExecuteUpdateAsync(update => update
+            .SetProperty(item => item.PasswordHash, hash)
+            .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+
+        return changed == 1;
     }
 
     public async Task<bool> VerifyEmailAsync(VerifyEmailRequest request, CancellationToken cancellationToken)
@@ -345,13 +415,13 @@ public class AuthService(
 
     private string BuildVerificationUrl(string token)
     {
-        var baseUrl = configuration["Auth:EmailVerificationUrl"];
-        if (string.IsNullOrWhiteSpace(baseUrl))
-        {
-            baseUrl = "https://fixtop.ge/";
-        }
-        var separator = baseUrl.Contains('?') ? "&" : "?";
-        return $"{baseUrl}{separator}verifyEmail={Uri.EscapeDataString(token)}";
+        return BuildAccountLink("verifyEmail", token, configuration["Auth:EmailVerificationUrl"]);
+    }
+
+    private static string BuildAccountLink(string parameter, string token, string? baseUrl)
+    {
+        return Microsoft.AspNetCore.WebUtilities.QueryHelpers.AddQueryString(
+            string.IsNullOrWhiteSpace(baseUrl) ? "https://fixtop.ge/" : baseUrl, parameter, token);
     }
 
     private static string CreateEmailVerificationToken()

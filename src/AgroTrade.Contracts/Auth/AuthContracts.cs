@@ -16,6 +16,10 @@ public record UpdateUserRoleRequest(string Role);
 public record UpdateUserBlockRequest(bool IsBlocked);
 public record LoginRequest(string Email, string Password);
 public record VerifyEmailRequest(string Token);
+
+public record ForgotPasswordRequest(string Email);
+
+public record ResetPasswordRequest(string Token, string Password);
 public record ResendEmailVerificationRequest(string Email);
 public record AuthUserDto(
     int Id,

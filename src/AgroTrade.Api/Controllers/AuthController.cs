@@ -3,6 +3,7 @@ using AgroTrade.Application.Services;
 using AgroTrade.Contracts.Auth;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using System.Security.Claims;
 
 namespace AgroTrade.Api.Controllers;
@@ -33,6 +34,23 @@ public class AuthController(IAuthService authService) : ControllerBase
     {
         var response = await authService.LoginAsync(request, cancellationToken);
         return response is null ? Unauthorized(new { message = "Email or password is incorrect." }) : Ok(response);
+    }
+
+    [HttpPost("forgot-password")]
+    [EnableRateLimiting("PasswordReset")]
+    public async Task<IActionResult> ForgotPassword(ForgotPasswordRequest request, CancellationToken cancellationToken)
+    {
+        await authService.SendPasswordResetAsync(request, cancellationToken);
+        return NoContent();
+    }
+
+    [HttpPost("reset-password")]
+    [EnableRateLimiting("PasswordReset")]
+    public async Task<IActionResult> ResetPassword(ResetPasswordRequest request, CancellationToken cancellationToken)
+    {
+        return await authService.ResetPasswordAsync(request, cancellationToken)
+            ? NoContent()
+            : BadRequest(new { message = "Invalid or expired password reset link." });
     }
 
     [HttpPost("verify-email")]

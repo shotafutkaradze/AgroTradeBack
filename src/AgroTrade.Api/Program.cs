@@ -4,7 +4,9 @@ using AgroTrade.Api;
 using AgroTrade.Domain.Enums;
 using AgroTrade.Infrastructure;
 using AgroTrade.Infrastructure.Services;
+using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -53,6 +55,19 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddDataProtection();
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("PasswordReset", context => RateLimitPartition.GetFixedWindowLimiter(
+        context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(5)
+        }));
+});
+
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
@@ -95,6 +110,7 @@ app.UseRouting();
 // CORS must run before authentication
 app.UseCors("FixtopCors");
 
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 

@@ -11,7 +11,22 @@ public class SmtpAccountEmailService(IOptions<SmtpEmailOptions> options) : IAcco
 {
     private readonly SmtpEmailOptions options = options.Value;
 
-    public async Task SendEmailVerificationAsync(AuthUserDto user, string verificationUrl, CancellationToken cancellationToken)
+    public Task SendEmailVerificationAsync(AuthUserDto user, string verificationUrl, CancellationToken cancellationToken)
+    {
+        return SendAsync(user, "Agro Trade - ელფოსტის დადასტურება",
+            BuildBody(user, verificationUrl), cancellationToken);
+    }
+
+    public Task SendPasswordResetAsync(AuthUserDto user, string resetUrl, CancellationToken cancellationToken)
+    {
+        var link = WebUtility.HtmlEncode(resetUrl);
+        return SendAsync(user, "Fix Top - პაროლის აღდგენა", $"""
+            <p>პაროლის შესაცვლელად გახსენით <a href="{link}">აღდგენის ბმული</a>.</p>
+            <p>ბმული 30 წუთით მოქმედებს. თუ პაროლის შეცვლა არ მოგითხოვიათ, შეგიძლიათ უგულებელყოთ ეს წერილი.</p>
+            """, cancellationToken);
+    }
+
+    private async Task SendAsync(AuthUserDto user, string subject, string body, CancellationToken cancellationToken)
     {
         if (!CanSend())
         {
@@ -21,8 +36,8 @@ public class SmtpAccountEmailService(IOptions<SmtpEmailOptions> options) : IAcco
         using var message = new MailMessage
         {
             From = new MailAddress(options.FromEmail, options.FromName, Encoding.UTF8),
-            Subject = "Agro Trade - ელფოსტის დადასტურება",
-            Body = BuildBody(user, verificationUrl),
+            Subject = subject,
+            Body = body,
             IsBodyHtml = true,
             BodyEncoding = Encoding.UTF8,
             SubjectEncoding = Encoding.UTF8
