@@ -345,9 +345,11 @@ public class AuthService(
 
     private string BuildVerificationUrl(string token)
     {
-        var baseUrl = configuration["Auth:EmailVerificationUrl"]
-            ?? configuration["BogInstallment:FrontendReturnUrl"]
-            ?? "http://localhost:5173/";
+        var baseUrl = configuration["Auth:EmailVerificationUrl"];
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            baseUrl = "https://fixtop.ge/";
+        }
         var separator = baseUrl.Contains('?') ? "&" : "?";
         return $"{baseUrl}{separator}verifyEmail={Uri.EscapeDataString(token)}";
     }

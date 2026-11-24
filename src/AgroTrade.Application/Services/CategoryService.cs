@@ -1,3 +1,4 @@
+using System.Transactions;
 using AgroTrade.Application.Abstractions;
 using AgroTrade.Contracts.Categories;
 using AgroTrade.Domain.Models;
@@ -39,6 +40,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
     public async Task<Category> CreateAsync(CategoryRequest request, CancellationToken cancellationToken)
     {
         ValidateRequest(request);
+        using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
         await ValidateParentAsync(request.ParentId, cancellationToken);
 
         var now = DateTimeOffset.UtcNow;
@@ -55,6 +57,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
 
         dbContext.Categories.Add(category);
         await dbContext.SaveChangesAsync(cancellationToken);
+        transaction.Complete();
         return category;
     }
 
@@ -62,6 +65,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
     {
         ValidateRequest(request);
 
+        using var transaction = new TransactionScope(TransactionScopeAsyncFlowOption.Enabled);
         var category = await dbContext.Categories.FirstOrDefaultAsync(category => category.Id == id, cancellationToken);
         if (category is null)
         {
@@ -73,7 +77,14 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
             throw new ArgumentException("Category cannot be its own parent.");
         }
 
-        await ValidateParentAsync(request.ParentId, cancellationToken);
+        if (request.ParentId != category.ParentId)
+        {
+            await ValidateParentAsync(request.ParentId, cancellationToken);
+            if (request.ParentId is not null && await dbContext.Categories.AnyAsync(child => child.ParentId == id, cancellationToken))
+            {
+                throw new ArgumentException("A category with subcategories cannot become a subcategory.");
+            }
+        }
 
         category.Name = request.Name.Trim();
         category.Slug = await CreateUniqueSlugAsync(request.Name, id, cancellationToken);
@@ -83,6 +94,7 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
         category.UpdatedAt = DateTimeOffset.UtcNow;
 
         await dbContext.SaveChangesAsync(cancellationToken);
+        transaction.Complete();
         return category;
     }
 
@@ -110,9 +122,20 @@ public class CategoryService(IAgroTradeDbContext dbContext) : ICategoryService
 
     private async Task ValidateParentAsync(int? parentId, CancellationToken cancellationToken)
     {
-        if (parentId is not null && !await dbContext.Categories.AnyAsync(category => category.Id == parentId, cancellationToken))
+        if (parentId is null)
+        {
+            return;
+        }
+
+        var parent = await dbContext.Categories.FindAsync([parentId.Value], cancellationToken);
+        if (parent is null)
         {
             throw new ArgumentException("Parent category does not exist.");
+        }
+
+        if (parent.ParentId is not null)
+        {
+            throw new ArgumentException("Only top-level categories can have subcategories.");
         }
     }
 
