@@ -51,7 +51,7 @@ public class AuthController(IAuthService authService) : ControllerBase
     }
 
     [HttpGet]
-    [Authorize(Policy = AuthorizationPolicies.AdminOrManager)]
+    [Authorize(Roles = "admin")]
     public async Task<IActionResult> Get(CancellationToken cancellationToken)
     {
         return Ok(await authService.GetUsersAsync(cancellationToken));
